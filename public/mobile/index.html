@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"/>
+<title>Elanzas</title>
+
+<link rel="manifest" href="/mobile/manifest.json"/>
+<meta name="theme-color" content="#1F3350"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Elanzas"/>
+<link rel="icon" href="/mobile/icons/favicon-32.png" sizes="32x32" type="image/png"/>
+<link rel="icon" href="/mobile/icons/favicon-16.png" sizes="16x16" type="image/png"/>
+<link rel="icon" href="/mobile/icons/icon-192.png" sizes="192x192" type="image/png"/>
+<link rel="apple-touch-icon" href="/mobile/icons/icon-192.png"/>
+
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="Elanzas"/>
+<meta property="og:title" content="Elanzas"/>
+<meta property="og:description" content="Capture new concepts on the go, straight from your phone's camera."/>
+<meta property="og:url" content="https://portal.elanzas.com/mobile/"/>
+<meta property="og:image" content="https://portal.elanzas.com/mobile/icons/icon-512.png"/>
+<meta property="og:image:width" content="512"/>
+<meta property="og:image:height" content="512"/>
+<meta name="twitter:card" content="summary"/>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/mobile/style.css">
+</head>
+<body>
+<div id="app"></div>
+<input type="file" id="cameraInput" accept="image/*" capture="environment" style="display:none"/>
+<input type="file" id="galleryInput" accept="image/*" multiple style="display:none"/>
+<script src="/mobile/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,517 @@
+const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const OpenAI = require('openai');
+const { toFile } = require('openai');
+const { PDFDocument } = require('pdf-lib');
+const { db } = require('../db');
+const { requireAuth, requirePermission } = require('../middleware/auth');
+const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile } = require('../lib/imageConvert');
+
+const router = express.Router();
+const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+function mimeFromExt(filePath){
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.avif') return 'image/avif';
+  return 'image/png';
+}
+
+const DEPT_CODES = {
+  Ladies: 'L', Mens: 'M', Babywear: 'B',
+  'Younger Boys': 'YB', 'Older Boys': 'OB',
+  'Younger Girls': 'YG', 'Older Girls': 'OG'
+};
+
+function nextConceptNo(department) {
+  const code = DEPT_CODES[department] || 'X';
+  const prefix = 'C' + code;
+  const rows = db.prepare('SELECT concept_no FROM concepts WHERE concept_no LIKE ?').all(prefix + '%');
+  let max = 0;
+  rows.forEach(r => {
+    const n = parseInt(String(r.concept_no).replace(prefix, ''), 10);
+    if (!isNaN(n) && n > max) max = n;
+  });
+  return prefix + String(max + 1).padStart(3, '0');
+}
+
+// Buyers get full browsing access to the range, but never see cost/factory -
+// same principle as scopeStyleForRole in lib/scope.js, kept local here since
+// concepts have their own field set.
+const BUYER_VISIBLE_CONCEPT_FIELDS = [
+  'id', 'concept_no', 'department', 'description', 'source', 'tags',
+  'favourite', 'cover_photo', 'has_cad', 'concept_date', 'created_at', 'updated_at'
+];
+function scopeConceptForRole(concept, user) {
+  if (user.role !== 'buyer') return concept;
+  const scoped = {};
+  BUYER_VISIBLE_CONCEPT_FIELDS.forEach(f => { scoped[f] = concept[f]; });
+  return scoped;
+}
+
+function attachCoverPhoto(row) {
+  const photo = db.prepare('SELECT path, thumb_path FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC LIMIT 1').get(row.id);
+  row.cover_photo = photo ? (photo.thumb_path || photo.path) : null;
+  const cad = db.prepare("SELECT 1 FROM concept_photos WHERE concept_id = ? AND role = 'cad' LIMIT 1").get(row.id);
+  row.has_cad = !!cad;
+  return row;
+}
+
+// Saves the full-size webp (saveBufferAsWebp) plus a 200px-wide thumbnail
+// alongside it - shared by both reference-photo upload routes below, so
+// newly-uploaded photos are board-ready without a separate backfill step.
+async function saveBufferAsWebpWithThumb(buffer, destDir, filenamePrefix) {
+  const filename = await saveBufferAsWebp(buffer, destDir, filenamePrefix);
+  const thumbFilename = filename.replace(/\.webp$/, '-thumb.webp');
+  await makeThumbnailFile(buffer, path.join(destDir, thumbFilename));
+  return { filename, thumbFilename };
+}
+
+// ---- Photo upload setup (shared uploads/ folder, concept- prefix) ----
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const ALLOWED_EXT = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'];
+
+// Generated CAD sheets (both the local composite and the AI version) live
+// in their own subfolder, named after the concept number - e.g. cl001.png -
+// rather than the usual concept-<id>-<timestamp> pattern used for uploads.
+const CAD_DIR = path.join(UPLOAD_DIR, 'concepts');
+fs.mkdirSync(CAD_DIR, { recursive: true });
+
+// Resolves a stored path like '/uploads/concepts/cl001.png' or
+// '/uploads/concept-8-...jpg' back to a real file on disk - handles both
+// the flat uploads/ folder and the uploads/concepts/ subfolder correctly,
+// unlike a plain UPLOAD_DIR + basename join.
+function resolveUploadPath(relPath){
+  return path.join(__dirname, '..', relPath);
+}
+
+// Kept in memory rather than written to disk as-is - every upload gets
+// converted to WebP (see lib/imageConvert.js) before it's ever saved, so
+// there's no raw file on disk to name/place until after that conversion.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!req.session.user || req.session.user.role === 'buyer') {
+      return cb(new Error('Not authorized to upload photos'));
+    }
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_EXT.includes(ext)) return cb(new Error('Only image files are allowed (jpg, png, webp, gif, avif)'));
+    cb(null, true);
+  }
+});
+
+// ---- List / search (everyone, including buyers) ----
+router.get('/', requireAuth, requirePermission('concepts'), (req, res) => {
+  const user = req.session.user;
+  // Concepts have no retailer of their own (they're pre-retailer design
+  // ideas), just a department - a buyer only sees concepts in their own
+  // department, same scoping principle as styles.js's retailer+department filter.
+  const rows = user.role === 'buyer'
+    ? db.prepare('SELECT * FROM concepts WHERE department = ? ORDER BY created_at DESC').all(user.department)
+    : db.prepare('SELECT * FROM concepts ORDER BY created_at DESC').all();
+  rows.forEach(attachCoverPhoto);
+  res.json({ concepts: rows.map(c => scopeConceptForRole(c, user)) });
+});
+
+router.get('/:id', requireAuth, requirePermission('concepts'), (req, res) => {
+  const user = req.session.user;
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Not found' });
+  if (user.role === 'buyer' && concept.department !== user.department) {
+    return res.status(403).json({ error: 'Not authorized for this concept' });
+  }
+  attachCoverPhoto(concept);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+  const conversions = db.prepare('SELECT * FROM concept_conversions WHERE concept_id = ? ORDER BY created_at DESC').all(concept.id);
+  res.json({ concept: scopeConceptForRole(concept, user), photos, conversions });
+});
+
+// ---- Create / edit / delete (buyers cannot) ----
+// Accepts multipart/form-data so the concept's fields and its initial
+// reference photos can be created in one atomic request - avoids the
+// two-request "create, then separately upload" sequence that had photos
+// silently going missing depending on exactly when the second request ran.
+router.post('/', requireAuth, upload.array('photos', 10), async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Buyers cannot create concepts' });
+  const { department, description, source, tags, cost_estimate, factory, shipping_date, favourite, concept_date } = req.body || {};
+  if (!department || !DEPT_CODES[department]) return res.status(400).json({ error: 'A valid department is required' });
+  const conceptNo = nextConceptNo(department);
+  const finalConceptDate = concept_date || new Date().toISOString().slice(0, 7); // 'YYYY-MM' - editable afterwards
+  const info = db.prepare(`
+    INSERT INTO concepts (concept_no, department, description, concept_date, source, tags, cost_estimate, factory, shipping_date, favourite)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
+  `).run(
+    conceptNo, department, (description || '').trim(), finalConceptDate,
+    source || null, tags || null, cost_estimate || null, factory || null, shipping_date || null,
+    (favourite === '1' || favourite === 1 || favourite === true) ? 1 : 0
+  );
+  const conceptId = info.lastInsertRowid;
+  let photoError = null;
+  if (req.files && req.files.length) {
+    try {
+      const insertPhoto = db.prepare('INSERT INTO concept_photos (concept_id, path, thumb_path) VALUES (?,?,?)');
+      for (const f of req.files) {
+        const { filename, thumbFilename } = await saveBufferAsWebpWithThumb(f.buffer, UPLOAD_DIR, `concept-${conceptId}`);
+        insertPhoto.run(conceptId, '/uploads/' + filename, '/uploads/' + thumbFilename);
+      }
+    } catch (e) {
+      // The concept itself is already created at this point - report the
+      // photo failure rather than losing the whole concept over it.
+      photoError = 'One or more photos could not be processed: ' + e.message;
+    }
+  }
+  const created = db.prepare('SELECT * FROM concepts WHERE id = ?').get(conceptId);
+  attachCoverPhoto(created);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(conceptId);
+  res.json({ concept: scopeConceptForRole(created, user), photos, photoError });
+});
+
+router.put('/:id', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Buyers cannot edit concepts' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+
+  const fields = ['description', 'source', 'tags', 'cost_estimate', 'factory', 'shipping_date', 'favourite', 'concept_date', 'cad_description'];
+  const updates = [];
+  const values = [];
+  fields.forEach(f => { if (req.body[f] !== undefined) { updates.push(`${f} = ?`); values.push(req.body[f]); } });
+
+  // Changing department reassigns the concept's code, since its prefix is
+  // department-derived (e.g. CL -> CM) - lets an early mistake be corrected
+  // properly instead of leaving a permanently mismatched prefix. The main
+  // CAD image is named after the code, so it gets renamed to match too;
+  // reference/detail photos are named by internal id, unaffected.
+  if (req.body.department !== undefined && req.body.department !== concept.department) {
+    if (!DEPT_CODES[req.body.department]) return res.status(400).json({ error: 'Invalid department' });
+    const newConceptNo = nextConceptNo(req.body.department);
+    updates.push('department = ?', 'concept_no = ?');
+    values.push(req.body.department, newConceptNo);
+
+    const cadPhoto = db.prepare("SELECT * FROM concept_photos WHERE concept_id = ? AND role = 'cad'").get(concept.id);
+    if (cadPhoto) {
+      const ext = path.extname(cadPhoto.path) || '.webp';
+      const newFilename = newConceptNo.toLowerCase() + ext;
+      try {
+        fs.renameSync(resolveUploadPath(cadPhoto.path), path.join(CAD_DIR, newFilename));
+        db.prepare('UPDATE concept_photos SET path = ? WHERE id = ?').run('/uploads/concepts/' + newFilename, cadPhoto.id);
+      } catch (e) { /* file already missing on disk - nothing to rename */ }
+    }
+  }
+
+  if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
+  values.push(req.params.id);
+  db.prepare(`UPDATE concepts SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+  const updated = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  attachCoverPhoto(updated);
+  res.json({ concept: scopeConceptForRole(updated, user) });
+});
+
+router.delete('/:id', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Buyers cannot delete concepts' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Not found' });
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ?').all(concept.id);
+  photos.forEach(p => {
+    fs.unlink(resolveUploadPath(p.path), () => {});
+    if (p.thumb_path) fs.unlink(resolveUploadPath(p.thumb_path), () => {});
+  });
+  db.prepare('DELETE FROM concept_photos WHERE concept_id = ?').run(concept.id);
+  db.prepare('DELETE FROM concept_conversions WHERE concept_id = ?').run(concept.id);
+  db.prepare('DELETE FROM concepts WHERE id = ?').run(concept.id);
+  res.json({ ok: true });
+});
+
+// ---- Photos ----
+router.post('/:id/photos', requireAuth, upload.array('photos', 10), async (req, res) => {
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Not found' });
+  if (!req.files || !req.files.length) return res.status(400).json({ error: 'No images received' });
+  try {
+    const insert = db.prepare('INSERT INTO concept_photos (concept_id, path, thumb_path) VALUES (?,?,?)');
+    for (const f of req.files) {
+      const { filename, thumbFilename } = await saveBufferAsWebpWithThumb(f.buffer, UPLOAD_DIR, `concept-${concept.id}`);
+      insert.run(concept.id, '/uploads/' + filename, '/uploads/' + thumbFilename);
+    }
+  } catch (e) {
+    return res.status(400).json({ error: 'Could not process one or more images: ' + e.message });
+  }
+  db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+  res.json({ photos });
+});
+
+// Persists a new photo order after a drag-and-drop reorder in the drawer.
+// Whichever photo ends up at position 0 becomes the board thumbnail.
+router.put('/:id/photos/reorder', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const { order } = req.body || {};
+  if (!Array.isArray(order) || !order.length) return res.status(400).json({ error: 'order array is required' });
+  const update = db.prepare('UPDATE concept_photos SET sort_order = ? WHERE id = ? AND concept_id = ?');
+  order.forEach((photoId, i) => update.run(i, photoId, req.params.id));
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  res.json({ photos });
+});
+
+router.delete('/:id/photos/:photoId', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const photo = db.prepare('SELECT * FROM concept_photos WHERE id = ? AND concept_id = ?').get(req.params.photoId, req.params.id);
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+  fs.unlink(resolveUploadPath(photo.path), () => {});
+  if (photo.thumb_path) fs.unlink(resolveUploadPath(photo.thumb_path), () => {});
+  db.prepare('DELETE FROM concept_photos WHERE id = ?').run(photo.id);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  res.json({ photos });
+});
+
+// Updates which "role" a photo plays - lets the team tag reference shots
+// vs sourced detail crops vs the final CAD sheet.
+router.put('/:id/photos/:photoId/role', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const { role } = req.body || {};
+  if (!['reference', 'detail', 'cad'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  const photo = db.prepare('SELECT * FROM concept_photos WHERE id = ? AND concept_id = ?').get(req.params.photoId, req.params.id);
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+  db.prepare('UPDATE concept_photos SET role = ? WHERE id = ?').run(role, photo.id);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  res.json({ photos });
+});
+
+// Renames a photo's label - used for the CAD tab's labeled detail crops
+// (e.g. "BUTTON DETAIL"), edited inline in the sidebar.
+router.put('/:id/photos/:photoId/label', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const { label } = req.body || {};
+  const photo = db.prepare('SELECT * FROM concept_photos WHERE id = ? AND concept_id = ?').get(req.params.photoId, req.params.id);
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+  db.prepare('UPDATE concept_photos SET label = ? WHERE id = ?').run((label || '').trim(), photo.id);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  res.json({ photos });
+});
+
+// Lets someone manually upload/override the main CAD image directly,
+// bypassing AI generation entirely - the escape hatch for when the AI
+// result isn't usable and a hand-made flat needs to go in its place.
+router.post('/:id/cad-main', requireAuth, upload.single('photo'), async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+  if (!req.file) return res.status(400).json({ error: 'An image file is required' });
+
+  const filename = `${concept.concept_no.toLowerCase()}.webp`;
+  try {
+    await convertBufferToWebpFile(req.file.buffer, path.join(CAD_DIR, filename));
+  } catch (e) {
+    return res.status(400).json({ error: 'Could not process that image: ' + e.message });
+  }
+  // Replace any previous CAD entry rather than stacking duplicates that
+  // would all point at the same (now overwritten) file.
+  db.prepare("DELETE FROM concept_photos WHERE concept_id = ? AND role = 'cad'").run(concept.id);
+  db.prepare('INSERT INTO concept_photos (concept_id, path, role) VALUES (?,?,?)').run(concept.id, '/uploads/concepts/' + filename, 'cad');
+  db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+  res.json({ photos });
+});
+
+// Adds one labeled detail crop (button, rivet, stitching close-up, etc.) to
+// the CAD tab's sidebar - unlimited, each with its own label, kept separate
+// from the main reference/detail photo grid on the Details tab.
+router.post('/:id/cad-details', requireAuth, upload.single('photo'), async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+  if (!req.file) return res.status(400).json({ error: 'An image file is required' });
+  const label = (req.body.label || '').trim();
+  if (!label) return res.status(400).json({ error: 'A label is required' });
+
+  let filename;
+  try {
+    filename = await saveBufferAsWebp(req.file.buffer, UPLOAD_DIR, `concept-${concept.id}`);
+  } catch (e) {
+    return res.status(400).json({ error: 'Could not process that image: ' + e.message });
+  }
+  db.prepare('INSERT INTO concept_photos (concept_id, path, role, label) VALUES (?,?,?,?)')
+    .run(concept.id, '/uploads/' + filename, 'cad_detail', label);
+  db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
+  const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+  res.json({ photos });
+});
+
+// Sends selected reference photos to OpenAI's image model and saves the
+// result back as a photo tagged 'cad'. Costs real money per call - this is
+// a genuine AI generation, not a local filter.
+//
+// Prompt below is the exact combination confirmed working well in testing:
+// gpt-image-1.5, input_fidelity 'high', quality 'high', both photos in one
+// call, and this detailed "replication task, not a design task" prompt.
+router.post('/:id/generate-cad-ai', requireAuth, async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  if (!openaiClient) return res.status(500).json({ error: 'OPENAI_API_KEY is not set on the server (.env)' });
+
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+
+  const { photoIds } = req.body || {};
+  if (!Array.isArray(photoIds) || !photoIds.length) return res.status(400).json({ error: 'photoIds array is required' });
+
+  // OpenAI's image model only accepts jpeg/png/webp input - confirmed via
+  // its own rejection error for both gif and avif ("Supported file formats
+  // are 'image/jpeg', 'image/png', and 'image/webp'"). An allowlist here
+  // is more robust than excluding known-bad formats one at a time.
+  const OPENAI_IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.webp'];
+  const photoRows = photoIds
+    .map(id => db.prepare('SELECT * FROM concept_photos WHERE id = ? AND concept_id = ?').get(id, concept.id))
+    .filter(Boolean)
+    .filter(p => OPENAI_IMAGE_EXT.includes(path.extname(p.path).toLowerCase()));
+
+  if (!photoRows.length) return res.status(400).json({ error: 'No usable reference photos (must be jpg, png or webp - gif and avif are not supported as AI input)' });
+
+  try {
+    const imageFiles = await Promise.all(photoRows.map(p => {
+      const fullPath = resolveUploadPath(p.path);
+      return toFile(fs.createReadStream(fullPath), null, { type: mimeFromExt(fullPath) });
+    }));
+
+    const prompt = `Using the attached reference images, create a high-end photograph of the front and back of the garment${concept.description ? ' ("' + concept.description + '")' : ''}, as if it were laid flat on a plain white floor/surface and photographed from directly above with soft, even natural lighting - a real photo of a physical garment on a plain white background, not a flat vector illustration or CAD-style graphic. Show realistic fabric texture, weight and drape, with natural folds and soft shadows consistent with real fabric resting on a flat surface.
+
+Look at all the details in the reference images carefully, and do not alter any of the design elements - colour, print, embroidery, construction, and proportions must all match exactly as shown.`;
+
+    const result = await openaiClient.images.edit({
+      model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5',
+      image: imageFiles,
+      input_fidelity: 'high',
+      quality: 'high',
+      prompt,
+      size: '1536x1024'
+    });
+
+    const b64 = result.data[0].b64_json;
+    const buffer = Buffer.from(b64, 'base64');
+    const filename = `${concept.concept_no.toLowerCase()}.webp`;
+    await convertBufferToWebpFile(buffer, path.join(CAD_DIR, filename));
+    // Replace any previous CAD entry rather than stacking duplicates that
+    // would all point at the same (now overwritten) file.
+    db.prepare("DELETE FROM concept_photos WHERE concept_id = ? AND role = 'cad'").run(concept.id);
+    db.prepare('INSERT INTO concept_photos (concept_id, path, role) VALUES (?,?,?)').run(concept.id, '/uploads/concepts/' + filename, 'cad');
+    db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
+    const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+    res.json({ photos });
+  } catch (e) {
+    console.error('CAD AI generation failed:', e.message);
+    res.status(500).json({ error: 'AI generation failed: ' + (e.message || 'unknown error') });
+  }
+});
+
+// Wraps a composited CAD sheet (built client-side on canvas) into a real
+// PDF and streams it back for download. Also keeps a copy on disk next to
+// the CAD image so it doesn't need regenerating every time.
+router.post('/:id/export-cad-pdf', requireAuth, async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+  const { image } = req.body || {};
+  const match = image && image.match(/^data:image\/(png|jpeg);base64,(.+)$/);
+  if (!match) return res.status(400).json({ error: 'A PNG or JPEG image is required' });
+
+  try {
+    const buffer = Buffer.from(match[2], 'base64');
+    const pdfDoc = await PDFDocument.create();
+    const embedded = match[1] === 'jpeg' ? await pdfDoc.embedJpg(buffer) : await pdfDoc.embedPng(buffer);
+    const page = pdfDoc.addPage([embedded.width, embedded.height]);
+    page.drawImage(embedded, { x: 0, y: 0, width: embedded.width, height: embedded.height });
+    const pdfBytes = await pdfDoc.save();
+
+    const filename = `${concept.concept_no.toLowerCase()}.pdf`;
+    fs.writeFileSync(path.join(CAD_DIR, filename), pdfBytes);
+
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (e) {
+    console.error('PDF export failed:', e.message);
+    res.status(500).json({ error: 'PDF export failed: ' + e.message });
+  }
+});
+
+// ---- Conversion logging (called by the frontend right after a style is
+// created from this concept - see drawer.js saveStyle) ----
+router.post('/:id/conversions', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+  const { style_id, style_no } = req.body || {};
+  if (!style_id || !style_no) return res.status(400).json({ error: 'style_id and style_no are required' });
+  db.prepare('INSERT INTO concept_conversions (concept_id, style_id, style_no) VALUES (?,?,?)').run(concept.id, style_id, style_no);
+  const conversions = db.prepare('SELECT * FROM concept_conversions WHERE concept_id = ? ORDER BY created_at DESC').all(concept.id);
+  res.json({ conversions });
+});
+
+// Copies this concept's photos over to a newly-created style, so a
+// converted concept doesn't need re-photographing. Reference photos are
+// copied first (plain 'reference' role, default cover-photo candidates);
+// the concept's generated/uploaded CAD image - if any - is copied last and
+// explicitly tagged role='cad', landing in the same uploads/styles/<style_no>
+// convention the style's own CAD routes use, so it's immediately recognized
+// as the style's CAD image rather than just another reference photo. Detail
+// crops (role='cad_detail') aren't carried over - that feature isn't part
+// of the style CAD tab.
+router.post('/:id/copy-photos-to-style/:styleId', requireAuth, (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const style = db.prepare('SELECT style_no FROM styles WHERE id = ?').get(req.params.styleId);
+  if (!style) return res.status(404).json({ error: 'Style not found' });
+  const conceptPhotos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
+  if (!conceptPhotos.length) return res.json({ copied: 0 });
+
+  const insertRef = db.prepare('INSERT INTO photos (style_id, path) VALUES (?,?)');
+  const insertCad = db.prepare("INSERT INTO photos (style_id, path, role) VALUES (?,?,'cad')");
+  const styleCadDir = path.join(UPLOAD_DIR, 'styles');
+  fs.mkdirSync(styleCadDir, { recursive: true });
+  let copied = 0;
+
+  conceptPhotos.filter(p => p.role !== 'cad' && p.role !== 'cad_detail').forEach(p => {
+    const ext = path.extname(p.path);
+    const destName = `style-${req.params.styleId}-${Date.now()}-${Math.random().toString(36).slice(2,8)}${ext}`;
+    try {
+      fs.copyFileSync(resolveUploadPath(p.path), path.join(UPLOAD_DIR, destName));
+      insertRef.run(req.params.styleId, '/uploads/' + destName);
+      copied++;
+    } catch (e) { /* skip missing files silently */ }
+  });
+
+  const cadPhoto = conceptPhotos.find(p => p.role === 'cad');
+  if (cadPhoto) {
+    const ext = path.extname(cadPhoto.path) || '.webp';
+    const destName = style.style_no.toLowerCase() + ext;
+    try {
+      fs.copyFileSync(resolveUploadPath(cadPhoto.path), path.join(styleCadDir, destName));
+      insertCad.run(req.params.styleId, '/uploads/styles/' + destName);
+      copied++;
+    } catch (e) { /* skip missing files silently */ }
+  }
+
+  res.json({ copied });
+});
+
+router.use((err, req, res, next) => {
+  if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
+  next();
+});
+
+module.exports = router;

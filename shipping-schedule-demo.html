@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Shipping Schedule - Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --denim:#2c3e50; --denim-dark:#1c2833; --chalk:#f4f2ee; --paper:#ffffff;
+    --ink:#22282e; --ink-soft:#6b7480; --line:#dfe0e0; --accent:#c0392b;
+    --ok:#2e7d46;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; font-family:'IBM Plex Sans',sans-serif; background:var(--chalk); color:var(--ink);}
+  h1{font-family:'Oswald',sans-serif; text-transform:uppercase; letter-spacing:0.03em; margin:0;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+  .topbar{display:flex; align-items:center; justify-content:space-between; padding:18px 22px; background:var(--paper); border-bottom:1px solid var(--line);}
+  .topbar p{margin:2px 0 0; color:var(--ink-soft); font-size:13px;}
+  .btn{font-family:'IBM Plex Sans',sans-serif; border:none; border-radius:5px; padding:9px 16px; font-size:13px; font-weight:600; cursor:pointer;}
+  .btn-primary{background:var(--denim); color:#fff;}
+  .btn-primary:hover{background:var(--denim-dark);}
+  .btn-ghost{background:transparent; border:1px solid var(--line); color:var(--ink);}
+  .btn-ghost:hover{background:#eceae5;}
+  .note{background:#fff8e6; border:1px solid #f0dca0; padding:10px 16px; font-size:12.5px; color:#6b5a1e; margin:14px 22px 0;}
+
+  .schedule-wrap{overflow-x:auto; margin:18px 22px; border:1px solid var(--line); border-radius:8px; background:var(--paper);}
+  table{border-collapse:separate; border-spacing:0; width:100%; table-layout:fixed;}
+  th,td{border-bottom:1px solid var(--line); padding:0; font-size:12.5px; white-space:nowrap;}
+  th{background:#eceae5; text-align:left; padding:8px 10px; font-size:10.5px; text-transform:uppercase; letter-spacing:0.03em; color:var(--ink-soft); position:sticky; top:0; z-index:3;}
+
+  /* Frozen (sticky) columns - stay visible while scrolling horizontally */
+  .fz{position:sticky; background:var(--paper); z-index:2;}
+  th.fz{z-index:4; background:#eceae5;}
+  .fz-0{left:0; width:34px;}
+  .fz-1{left:34px; width:150px;}
+  .fz-2{left:184px; width:80px;}
+  .fz-3{left:264px; width:70px;}
+  .fz-4{left:334px; width:130px;}
+  .fz-5{left:464px; width:130px;}
+  .fz-6{left:594px; width:110px;}
+  .fz-shadow{box-shadow: 2px 0 4px rgba(0,0,0,0.08);}
+
+  td input{width:100%; border:none; background:transparent; font-size:12.5px; font-family:'IBM Plex Sans',sans-serif; padding:8px 10px; color:var(--ink);}
+  td input:focus{background:#fff9e0; outline:2px solid var(--denim); outline-offset:-2px;}
+
+  .col-desc{width:210px;} .col-colour{width:90px;} .col-units{width:70px;} .col-rsp{width:90px;} .col-margin{width:80px;}
+  .scroll-cell{padding:8px 10px; color:var(--ink-soft);}
+
+  .drag-handle{cursor:grab; text-align:center; color:var(--ink-soft); font-size:15px;}
+  .drag-handle:active{cursor:grabbing;}
+  tr.dragging{opacity:0.35;}
+  tr.drop-target td{border-top:2px solid var(--accent);}
+
+  .group-header td{background:#e4e9ee; font-weight:600; padding:9px 10px; color:var(--denim-dark); vertical-align:middle;}
+  .group-header input{font-weight:600; background:transparent;}
+  .group-meta{font-size:11px; font-weight:400; color:var(--ink-soft); margin-left:10px;}
+  .group-header select{font-family:'IBM Plex Sans',sans-serif; font-size:11.5px; font-weight:600; border:1px solid var(--line); border-radius:4px; padding:3px 6px; margin-left:10px; background:#fff; color:var(--denim-dark);}
+  .cap-bar-wrap{display:inline-flex; align-items:center; gap:7px; margin-left:12px; vertical-align:middle;}
+  .cap-bar{width:120px; height:8px; border-radius:4px; background:#d7dde2; overflow:hidden; position:relative;}
+  .cap-bar-fill{display:block; position:absolute; left:0; top:0; height:100%; border-radius:4px; transition:width .15s;}
+  .cap-fill-empty{background:var(--accent);}
+  .cap-fill-mid{background:#c98a1f;}
+  .cap-fill-full{background:var(--ok);}
+  .cap-fill-critical{background:#7b241c;}
+  .cap-label{font-size:10.5px; font-weight:600; color:var(--ink-soft); font-family:'IBM Plex Mono',monospace;}
+  .cap-label.over{color:var(--accent);}
+  .date-range{font-size:10.5px; font-weight:600; margin-left:10px; font-family:'IBM Plex Mono',monospace; color:var(--ink-soft);}
+  .date-range.warn{color:var(--accent);}
+
+  .edit-btn{background:transparent; border:1px solid var(--line); border-radius:4px; font-size:11px; padding:4px 8px; cursor:pointer; color:var(--denim);}
+  .edit-btn:hover{background:#eceae5;}
+  .auto-btn{background:#eaf3ff; border:1px solid #b9d6f5; border-radius:4px; font-size:11px; padding:4px 9px; cursor:pointer; color:#1a5fa8; font-weight:600; margin-left:10px;}
+  .auto-btn:hover{background:#d9ecff;}
+  .suggestion-banner{display:none; align-items:center; justify-content:space-between; background:#eaf3ff; border:1px solid #b9d6f5; border-radius:6px; padding:11px 16px; margin:14px 22px 0; font-size:12.5px;}
+  .suggested-row td{background:#fff6da !important;}
+  .suggested-row td.fz{background:#fff6da !important;}
+  .bail-suggested-row td{background:#ffe4cc !important;}
+  .bail-suggested-row td.fz{background:#ffe4cc !important;}
+  .bail-badge{background:var(--accent); color:#fff; font-size:9px; font-weight:700; padding:1px 5px; border-radius:3px; margin-left:6px; letter-spacing:0.02em;}
+  .group-notes-row td{background:#f7f5f0; padding:0;}
+  .notes-input{width:100%; border:none; background:transparent; font-size:11.5px; font-style:italic; color:var(--ink-soft); padding:6px 10px; font-family:'IBM Plex Sans',sans-serif;}
+  .notes-input:focus{background:#fff9e0; outline:none; font-style:normal; color:var(--ink);}
+  .bail-btn{background:transparent; border:1px solid var(--line); border-radius:4px; font-size:10.5px; padding:3px 7px; cursor:pointer; color:var(--ink-soft); margin-left:4px;}
+  .bail-btn.active{background:var(--accent); border-color:var(--accent); color:#fff;}
+
+  /* Drawer (matches Styles/Concepts drawer pattern) */
+  .overlay{position:fixed; inset:0; background:rgba(20,24,28,0.45); opacity:0; pointer-events:none; transition:opacity .15s; z-index:40;}
+  .overlay.open{opacity:1; pointer-events:auto;}
+  .drawer{position:fixed; top:0; right:-460px; width:440px; height:100%; background:var(--paper); box-shadow:-6px 0 24px rgba(0,0,0,0.15); transition:right .18s ease; z-index:41; display:flex; flex-direction:column;}
+  .drawer.open{right:0;}
+  .drawer-head{display:flex; justify-content:space-between; align-items:center; padding:18px 20px; border-bottom:1px solid var(--line);}
+  .drawer-head h2{font-size:16px;}
+  .drawer-close{background:none; border:none; font-size:22px; cursor:pointer; color:var(--ink-soft);}
+  .tabs{display:flex; border-bottom:1px solid var(--line); padding:0 14px;}
+  .tab{background:none; border:none; padding:11px 12px; font-size:12px; font-weight:600; color:var(--ink-soft); cursor:pointer; border-bottom:2px solid transparent;}
+  .tab.active{color:var(--denim); border-bottom-color:var(--denim);}
+  .drawer-body{flex:1; overflow-y:auto; padding:16px 20px;}
+  .tab-panel{display:none;}
+  .tab-panel.active{display:block;}
+  .field{margin-bottom:12px;}
+  .field label{display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:0.03em; color:var(--ink-soft); margin-bottom:4px;}
+  .field input{width:100%; padding:8px 9px; border:1px solid var(--line); border-radius:5px; font-size:13px; font-family:'IBM Plex Sans',sans-serif;}
+  .row2{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .drawer-actions{padding:14px 20px; border-top:1px solid var(--line); display:flex; justify-content:flex-end;}
+
+  .toast{position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(20px); background:var(--denim-dark); color:#fff; padding:10px 18px; border-radius:6px; font-size:13px; opacity:0; transition:all .2s; z-index:60;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div><h1>Shipping Schedule</h1><p id="summary-line"></p></div>
+  <div style="display:flex; align-items:center; gap:16px;">
+    <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-soft);">
+      Group within <input id="grouping-window" type="number" min="1" value="21" style="width:50px; padding:5px 6px; border:1px solid var(--line); border-radius:4px; font-family:'IBM Plex Sans',sans-serif;" onchange="setGroupingWindow(this.value)"/> days of each other
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-soft);">
+      Allow over by <input id="overage-allowance" type="number" min="0" step="0.5" value="3" style="width:50px; padding:5px 6px; border:1px solid var(--line); border-radius:4px; font-family:'IBM Plex Sans',sans-serif;" onchange="setOverageAllowance(this.value)"/> CBM (bail)
+    </div>
+    <button class="btn btn-primary" onclick="addContainer()">+ New Container</button>
+  </div>
+</div>
+
+<div class="note">
+  <strong>Local demo only</strong> - dummy data, nothing here touches the live portal. Orders will flow in automatically from the Style pipeline once a style reaches a confirmed-order stage - this view is for grouping and shipping them, not creating them. Drag any row's ⠿ handle onto another row to reorder it and move it into that container. Frozen columns (⠿ through Order Number) are editable right in the grid. Click "Edit" on any row for the rest of the fields.
+</div>
+
+<div class="suggestion-banner" id="suggestion-banner"></div>
+
+<div class="schedule-wrap">
+  <table id="schedule-table">
+    <thead>
+      <tr>
+        <th class="fz fz-0"></th>
+        <th class="fz fz-1">Style / Customer</th>
+        <th class="fz fz-2">Season</th>
+        <th class="fz fz-3">CBM</th>
+        <th class="fz fz-4 fz-shadow">PO Delivery → DC</th>
+        <th class="fz fz-5">CK PO DC Date</th>
+        <th class="fz fz-6">Order #</th>
+        <th class="col-desc">Description</th>
+        <th class="col-colour">Colour</th>
+        <th class="col-units">Units</th>
+        <th class="col-rsp">RSP</th>
+        <th class="col-margin">Margin</th>
+        <th style="width:70px;"></th>
+      </tr>
+    </thead>
+    <tbody id="schedule-body"></tbody>
+  </table>
+</div>
+
+<div class="overlay" id="overlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <h2 id="drawer-title">Order</h2>
+    <button class="drawer-close" onclick="closeDrawer()">&times;</button>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="product" onclick="setTab('product')">Product</button>
+    <button class="tab" data-tab="factory" onclick="setTab('factory')">Factory</button>
+    <button class="tab" data-tab="costing" onclick="setTab('costing')">Costing</button>
+    <button class="tab" data-tab="invoicing" onclick="setTab('invoicing')">Invoicing</button>
+  </div>
+  <div class="drawer-body">
+    <div class="tab-panel active" data-panel="product">
+      <div class="field"><label>Description</label><input id="d-description"/></div>
+      <div class="row2">
+        <div class="field"><label>Colour</label><input id="d-colour"/></div>
+        <div class="field"><label>Units</label><input id="d-units"/></div>
+      </div>
+      <div class="field"><label>Selling price (RSP)</label><input id="d-rsp"/></div>
+    </div>
+    <div class="tab-panel" data-panel="factory">
+      <div class="field"><label>Date order sent to factory</label><input id="d-sent_to_factory"/></div>
+      <div class="row2">
+        <div class="field"><label>Labdip / trim approval</label><input id="d-labdip"/></div>
+        <div class="field"><label>Fabric test date</label><input id="d-fabric_test"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Fit date</label><input id="d-fit"/></div>
+        <div class="field"><label>Pre-prod date</label><input id="d-preprod"/></div>
+      </div>
+      <div class="field"><label>Pre-ship date</label><input id="d-preship"/></div>
+    </div>
+    <div class="tab-panel" data-panel="costing">
+      <div class="row2">
+        <div class="field"><label>PO $ price</label><input id="d-po_price"/></div>
+        <div class="field"><label>Rand price excl VAT</label><input id="d-rand_excl"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Landed ROE</label><input id="d-roe"/></div>
+        <div class="field"><label>Total landed</label><input id="d-landed"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Profit (R)</label><input id="d-profit"/></div>
+        <div class="field"><label>Margin %</label><input id="d-margin"/></div>
+      </div>
+    </div>
+    <div class="tab-panel" data-panel="invoicing">
+      <div class="row2">
+        <div class="field"><label>Supplier invoice #</label><input id="d-supp_inv"/></div>
+        <div class="field"><label>Supplier inv date</label><input id="d-supp_inv_date"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Actual DC date</label><input id="d-actual_dc"/></div>
+        <div class="field"><label>Payment due</label><input id="d-payment_due"/></div>
+      </div>
+      <div class="field"><label>Invoice Rand value</label><input id="d-invoice_value"/></div>
+      <div class="field"><label>Elanza inv paid date</label><input id="d-elanza_paid"/></div>
+    </div>
+  </div>
+  <div class="drawer-actions">
+    <button class="btn btn-primary" onclick="saveDrawer()">Save changes</button>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ---- Dummy seed data ----
+// Small helper so the pool of unassigned orders can be seeded compactly:
+// [styleNo, season, orderNo, cbm, description, colour, units, rsp, poDelivery]
+const unassignedSeed = [
+  ['PL501','Summer 26','PO-33601', 4.2, 'Denim Skirt','Black','980','229.99','2026-08-20'],
+  ['EYG045','Summer 26','PO-33602', 9.8, 'Ruffle Sleeve Blouse','White','1500','189.99','2026-08-18'],
+  ['PEOB020','Winter 26','PO-33603', 12.1, 'Puffer Jacket','Navy','2200','349.99','2026-09-05'],
+  ['PL502','Summer 26','PO-33604', 3.4, 'Lace Trim Cami','Ivory','1100','129.99','2026-08-22'],
+  ['EOG010','Summer 27','PO-33605', 6.7, 'Pleated Midi Skirt','Blush','1350','199.99','2027-06-10'],
+  ['PEYB008','Winter 26','PO-33606', 14.9, 'Fleece Hoodie Set','Charcoal','1900','249.99','2026-09-12'],
+  ['PL503','Summer 26','PO-33607', 2.1, 'Embroidered Vest','Multi','700','159.99','2026-08-25'],
+  ['EYG046','Summer 26','PO-33608', 8.3, 'Denim Overall Dress','Mid Blue','1250','219.99','2026-09-08'],
+  ['PEOB021','Winter 26','PO-33609', 5.6, 'Corduroy Trousers','Camel','1600','189.99','2026-08-19'],
+  ['PL504','Summer 26','PO-33610', 11.2, 'Broderie Sundress','White','1400','179.99','2026-09-15'],
+  ['EOG011','Summer 26','PO-33611', 7.5, 'Knit Cardigan','Sage','1150','159.99','2026-08-21'],
+  ['PEYB009','Winter 26','PO-33612', 3.9, 'Thermal Base Layer','Grey','2100','99.99','2026-09-02'],
+  ['PL505','Summer 26','PO-33613', 9.1, 'Wide Leg Culottes','Terracotta','1050','199.99','2026-08-17'],
+  ['EYG047','Summer 26','PO-33614', 4.8, 'Gingham Playsuit','Yellow','1800','169.99','2026-09-20'],
+  ['PEOB022','Winter 26','PO-33615', 13.4, 'Padded Parka','Olive','1700','329.99','2026-08-16'],
+  ['PL506','Summer 26','PO-33616', 6.2, 'Satin Slip Dress','Champagne','900','229.99','2026-09-01'],
+  ['EOG012','Summer 26','PO-33617', 2.8, 'Crop Cardigan','Rose','1300','139.99','2026-08-23'],
+  ['PEYB010','Winter 26','PO-33618', 10.5, 'Quilted Bomber','Black','1550','279.99','2026-08-30'],
+];
+function blankSecondaryFields(){
+  return {
+    sent_to_factory:'', labdip:'', fabric_test:'', fit:'', preprod:'', preship:'',
+    po_price:'', rand_excl:'', roe:'', landed:'', profit:'', margin:'',
+    supp_inv:'', supp_inv_date:'', actual_dc:'', payment_due:'', invoice_value:'', elanza_paid:''
+  };
+}
+
+let containers = [
+  {
+    id: 'pool', containerNo: 'Unassigned Orders (awaiting container)', vessel: '-', containerType: null,
+    orders: unassignedSeed.map((t,i)=>({
+      id:'p'+(i+1), styleNo:t[0], season:t[1], orderNo:t[2], cbm:t[3], poDelivery:t[8], ckDate:'',
+      description:t[4], colour:t[5], units:t[6], rsp:t[7], ...blankSecondaryFields()
+    }))
+  },
+  {
+    id: 'c1', containerNo: 'PCIU8786391 / 40HQ', vessel: 'MSC ARIANE', containerType: '40FT HQ', notes: '',
+    orders: [
+      { id:'o1', styleNo:'PL425', season:'Summer 26', cbm:12.4, poDelivery:'2026-08-15', ckDate:'2026-08-01', orderNo:'PO-33421',
+        description:'Heart Embroidered Cropped Wide Leg Jeans', colour:'Mid Blue', units:'1690', rsp:'369.99', margin:'44.5%',
+        sent_to_factory:'2026-04-02', labdip:'Approved', fabric_test:'2026-04-20', fit:'2026-05-01', preprod:'2026-05-20', preship:'2026-06-15',
+        po_price:'9.80', rand_excl:'178.50', roe:'18.20', landed:'205.10', profit:'164.89', supp_inv:'', supp_inv_date:'', actual_dc:'', payment_due:'', invoice_value:'', elanza_paid:'' },
+      { id:'o2', styleNo:'EYG012', season:'Summer 26', cbm:8.1, poDelivery:'2026-08-15', ckDate:'2026-08-01', orderNo:'PO-33430',
+        description:'Floral Print Playsuit', colour:'Pink Floral', units:'2200', rsp:'249.99', margin:'41.2%',
+        sent_to_factory:'2026-04-05', labdip:'Approved', fabric_test:'2026-04-22', fit:'', preprod:'', preship:'',
+        po_price:'6.10', rand_excl:'111.20', roe:'18.20', landed:'128.40', profit:'99.30', supp_inv:'', supp_inv_date:'', actual_dc:'', payment_due:'', invoice_value:'', elanza_paid:'' }
+    ]
+  },
+  {
+    id: 'c2', containerNo: 'CX0871193 / 40HQ', vessel: 'TBA', containerType: '40FT NOR', notes: '',
+    orders: [
+      { id:'o3', styleNo:'PEOB004', season:'Winter 26', cbm:15.9, poDelivery:'2026-09-10', ckDate:'2026-08-27', orderNo:'PO-33501',
+        description:'Fleece Lined Track Pants', colour:'Charcoal', units:'3100', rsp:'179.99', margin:'38.9%',
+        sent_to_factory:'2026-05-01', labdip:'Pending', fabric_test:'', fit:'', preprod:'', preship:'',
+        po_price:'4.40', rand_excl:'80.10', roe:'18.35', landed:'92.60', profit:'70.40', supp_inv:'', supp_inv_date:'', actual_dc:'', payment_due:'', invoice_value:'', elanza_paid:'' }
+    ]
+  }
+];
+
+let dragSourceId = null;
+let currentEdit = null; // { containerId, orderId }
+let suggestion = null; // { containerId, orderIds, total, remaining, maxCbm, used }
+let groupingWindowDays = 21; // orders due more than this many days apart shouldn't share a container
+let overageAllowanceCbm = 3; // how far over capacity a container can go if the extra order gets bailed
+
+function setGroupingWindow(val){ groupingWindowDays = parseInt(val,10) || 21; render(); }
+function setOverageAllowance(val){ overageAllowanceCbm = parseFloat(val) || 0; render(); }
+
+function parseDate(str){
+  if (!str) return null;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(str) ? new Date(str + 'T00:00:00') : new Date(str);
+  return isNaN(d) ? null : d;
+}
+function daysBetween(a, b){ return Math.round(Math.abs(a - b) / (1000*60*60*24)); }
+function formatDateShort(str){
+  const d = parseDate(str);
+  return d ? d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }) : (str || '');
+}
+// Used in the grid's editable date cells - no year, e.g. "18 Aug", since
+// that's all that's needed at a glance; the full ISO date is still what's
+// stored underneath so date-window checks keep working.
+function formatDateCell(str){
+  const d = parseDate(str);
+  return d ? d.toLocaleDateString('en-GB', { day:'numeric', month:'short' }) : (str || '');
+}
+// Fires on blur (onchange) rather than every keystroke, since typing a date
+// needs to be finished before it can be parsed. Accepts pretty much
+// anything Date can read ("18 Aug 2026", "2026-08-18", etc.) and stores it
+// back as a clean ISO date; falls back to keeping the raw text if it can't
+// be understood, rather than losing what was typed.
+function updateDateField(orderId, field, rawText){
+  const found = findOrder(orderId);
+  if (!found) return;
+  const trimmed = rawText.trim();
+  if (!trimmed) { found.order[field] = ''; render(); return; }
+  const parsed = parseDate(trimmed);
+  if (parsed) {
+    found.order[field] = parsed.toISOString().slice(0,10);
+  } else {
+    found.order[field] = trimmed;
+    toast('Could not read that as a date - kept as typed');
+  }
+  render();
+}
+function containerDateRange(orders){
+  const dates = orders.map(o=>parseDate(o.poDelivery)).filter(Boolean);
+  if (!dates.length) return null;
+  const min = new Date(Math.min(...dates));
+  const max = new Date(Math.max(...dates));
+  return { min, max, spreadDays: daysBetween(min, max) };
+}
+// Soonest delivery first; orders with no date set yet sink to the bottom
+// rather than being sorted arbitrarily.
+function sortByDelivery(orders){
+  return orders.sort((a,b)=>{
+    const da = parseDate(a.poDelivery), db = parseDate(b.poDelivery);
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return da - db;
+  });
+}
+
+// Max load CBM per container type - per the loading capacity reference and
+// carrier confirmation that there's no fixed minimum for FCL shipments.
+const CONTAINER_CAPACITY = {
+  '20FT': 28,
+  '40FT GP': 58,
+  '40FT NOR': 55,
+  '40FT HQ': 68
+};
+
+function findOrder(orderId){
+  for (const c of containers) {
+    const o = c.orders.find(x=>x.id===orderId);
+    if (o) return { container:c, order:o };
+  }
+  return null;
+}
+
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+function renderSummary(){
+  const totalOrders = containers.reduce((s,c)=>s+c.orders.length,0);
+  document.getElementById('summary-line').textContent = `${containers.length} containers · ${totalOrders} orders`;
+}
+
+function render(){
+  renderSummary();
+  const body = document.getElementById('schedule-body');
+  let html = '';
+  const orderedContainers = [...containers.filter(c=>c.id!=='pool'), ...containers.filter(c=>c.id==='pool')];
+  orderedContainers.forEach(c=>{
+    sortByDelivery(c.orders);
+    const totalCbm = c.orders.reduce((s,o)=>s+(parseFloat(o.cbm)||0),0);
+    const totalUnits = c.orders.reduce((s,o)=>s+(parseInt(o.units)||0),0);
+    if (c.id === 'pool') {
+      html += `
+        <tr class="group-header" data-container="pool" ondragover="event.preventDefault()" ondrop="onDropOnGroup(event,'pool')">
+          <td class="fz fz-0"></td>
+          <td class="fz fz-1" colspan="6" style="width:auto;">
+            ${c.containerNo}
+            <span class="group-meta">${c.orders.length} orders · ${totalCbm.toFixed(1)} CBM total</span>
+          </td>
+          <td colspan="6"></td>
+        </tr>`;
+    } else {
+      const maxCbm = CONTAINER_CAPACITY[c.containerType] || 0;
+      const pct = maxCbm ? Math.min(100, (totalCbm/maxCbm)*100) : 0;
+      const fillClass = !maxCbm ? '' : (totalCbm > maxCbm ? 'cap-fill-critical' : (pct < 50 ? 'cap-fill-empty' : (pct < 90 ? 'cap-fill-mid' : 'cap-fill-full')));
+      const typeOptions = Object.keys(CONTAINER_CAPACITY).map(t=>`<option value="${t}" ${c.containerType===t?'selected':''}>${t}</option>`).join('');
+      const range = containerDateRange(c.orders);
+      const rangeWarn = range && range.spreadDays > groupingWindowDays;
+      const rangeHtml = !range ? '' :
+        `<span class="date-range ${rangeWarn?'warn':''}">${rangeWarn?'\u26a0 ':''}${formatDateShort(range.min)} \u2013 ${formatDateShort(range.max)}${rangeWarn?` (${range.spreadDays}d apart)`:''}</span>`;
+      html += `
+        <tr class="group-header" data-container="${c.id}" ondragover="event.preventDefault()" ondrop="onDropOnGroup(event,'${c.id}')">
+          <td class="fz fz-0"></td>
+          <td class="fz fz-1" colspan="6" style="width:auto;">
+            <input value="${c.containerNo}" oninput="renameContainer('${c.id}', this.value)"/>
+            <select onchange="setContainerType('${c.id}', this.value)">${typeOptions}</select>
+            <span class="cap-bar-wrap">
+              <span class="cap-bar"><span class="cap-bar-fill ${fillClass}" style="width:${pct}%;"></span></span>
+              <span class="cap-label ${totalCbm>maxCbm?'over':''}">${totalCbm.toFixed(1)} / ${maxCbm} CBM${totalCbm>maxCbm?' - OVER':''}</span>
+            </span>
+            ${rangeHtml}
+            <button class="auto-btn" onclick="autoSuggest('${c.id}')">Auto-suggest</button>
+            <button class="auto-btn" style="background:#e9f7ee; border-color:#b7e0c6; color:#1e7a3c;" onclick="markDelivered('${c.id}')">\u2713 Delivered - remove</button>
+            <span class="group-meta">${totalUnits} units · vessel ${c.vessel}</span>
+          </td>
+          <td colspan="6"></td>
+        </tr>
+        <tr class="group-notes-row" data-container="${c.id}">
+          <td class="fz fz-0"></td>
+          <td colspan="12" style="width:auto;">
+            <input class="notes-input" placeholder="Notes (e.g. bail instructions)..." value="${c.notes||''}" oninput="updateContainerNotes('${c.id}', this.value)"/>
+          </td>
+        </tr>`;
+    }
+    c.orders.forEach(o=>{
+      const isSuggested = suggestion && suggestion.orderIds.includes(o.id);
+      const isBailSuggested = suggestion && suggestion.bailOrderId === o.id;
+      const rowClass = isBailSuggested ? 'bail-suggested-row' : (isSuggested ? 'suggested-row' : '');
+      html += `
+        <tr draggable="true" data-order="${o.id}" data-container="${c.id}" class="${rowClass}"
+            ondragstart="onDragStart(event,'${o.id}')" ondragend="onDragEnd(event)"
+            ondragover="event.preventDefault()" ondrop="onDropOnRow(event,'${o.id}')">
+          <td class="fz fz-0 drag-handle">⠿</td>
+          <td class="fz fz-1"><input value="${o.styleNo}" oninput="updateField('${o.id}','styleNo',this.value)"/>${o.bailed?'<span class="bail-badge">BAIL</span>':''}</td>
+          <td class="fz fz-2"><input value="${o.season}" oninput="updateField('${o.id}','season',this.value)"/></td>
+          <td class="fz fz-3"><input value="${o.cbm}" oninput="updateField('${o.id}','cbm',this.value); render();"/></td>
+          <td class="fz fz-4 fz-shadow"><input value="${formatDateCell(o.poDelivery)}" onchange="updateDateField('${o.id}','poDelivery',this.value)"/></td>
+          <td class="fz fz-5"><input value="${formatDateCell(o.ckDate)}" onchange="updateDateField('${o.id}','ckDate',this.value)"/></td>
+          <td class="fz fz-6"><input value="${o.orderNo}" oninput="updateField('${o.id}','orderNo',this.value)"/></td>
+          <td class="scroll-cell col-desc">${o.description||''}</td>
+          <td class="scroll-cell col-colour">${o.colour||''}</td>
+          <td class="scroll-cell col-units">${o.units||''}</td>
+          <td class="scroll-cell col-rsp">${o.rsp?('R'+o.rsp):''}</td>
+          <td class="scroll-cell col-margin">${o.margin||''}</td>
+          <td class="scroll-cell"><button class="edit-btn" onclick="openDrawer('${o.id}')">Edit</button><button class="bail-btn ${o.bailed?'active':''}" onclick="toggleBail('${o.id}')" title="Mark this order to be packed in a bail">Bail</button></td>
+        </tr>`;
+    });
+  });
+  body.innerHTML = html;
+  renderSuggestionBanner();
+}
+
+function renderSuggestionBanner(){
+  const el = document.getElementById('suggestion-banner');
+  if (!suggestion) { el.style.display = 'none'; return; }
+  const c = containers.find(x=>x.id===suggestion.containerId);
+  if (!c) { suggestion = null; el.style.display='none'; return; }
+  const bailInfo = suggestion.bailOrderId ? findOrder(suggestion.bailOrderId) : null;
+  const newTotal = suggestion.used + suggestion.total + (bailInfo ? (parseFloat(bailInfo.order.cbm)||0) : 0);
+  const pct = suggestion.maxCbm ? ((newTotal/suggestion.maxCbm)*100).toFixed(0) : 0;
+  const totalCount = suggestion.orderIds.length + (bailInfo ? 1 : 0);
+  const bailLine = bailInfo ? ` · <strong style="color:var(--accent);">${bailInfo.order.styleNo}</strong> highlighted in orange would need bailing (${suggestion.bailOverage.toFixed(1)} CBM over)` : '';
+  el.style.display = 'flex';
+  el.innerHTML = `
+    <div>
+      <strong>Auto-suggest for ${c.containerNo}</strong>
+      <span class="group-meta">${suggestion.orderIds.length} orders highlighted below \u2014 would bring it to ${newTotal.toFixed(1)} / ${suggestion.maxCbm} CBM (${pct}%)${bailLine}</span>
+    </div>
+    <div>
+      <button class="btn btn-ghost" onclick="clearSuggestion()">Clear</button>
+      <button class="btn btn-primary" onclick="applySuggestion()" style="margin-left:8px;">Add these ${totalCount} orders</button>
+    </div>`;
+}
+
+// Looks at the unassigned pool and proposes which orders would best fill
+// the remaining space in this container, without exceeding capacity.
+// Tries both largest-first and smallest-first greedy fills and keeps
+// whichever packs in more CBM - a simple, explainable approach rather
+// than a black-box optimizer.
+function autoSuggest(containerId){
+  const c = containers.find(x=>x.id===containerId);
+  if (!c || !CONTAINER_CAPACITY[c.containerType]) { toast('Select a container type first'); return; }
+  const maxCbm = CONTAINER_CAPACITY[c.containerType];
+  const used = c.orders.reduce((s,o)=>s+(parseFloat(o.cbm)||0),0);
+  const remaining = maxCbm - used;
+  if (remaining <= 0) { toast('Container is already at or over capacity'); return; }
+
+  const pool = containers.find(x=>x.id==='pool');
+  let candidates = pool.orders.filter(o=>(parseFloat(o.cbm)||0) <= remaining + 0.001);
+
+  // Delivery date is the more important constraint than CBM alone - never
+  // suggest an order whose due date falls outside the grouping window
+  // relative to what's already committed to this container.
+  const existingRange = containerDateRange(c.orders);
+  let dateFiltered = 0;
+  if (existingRange) {
+    const before = candidates.length;
+    candidates = candidates.filter(o=>{
+      const d = parseDate(o.poDelivery);
+      if (!d) return true; // no date set yet - don't block it, just can't check it
+      return daysBetween(d, existingRange.min) <= groupingWindowDays && daysBetween(d, existingRange.max) <= groupingWindowDays;
+    });
+    dateFiltered = before - candidates.length;
+  }
+  if (!candidates.length) { toast('No unassigned orders both fit the space and match the delivery window'); return; }
+
+  function greedyFill(list){
+    let total = 0; const chosen = [];
+    list.forEach(o=>{
+      const cbm = parseFloat(o.cbm) || 0;
+      if (total + cbm <= remaining + 0.001) { chosen.push(o.id); total += cbm; }
+    });
+    return { chosen, total };
+  }
+  const desc = greedyFill([...candidates].sort((a,b)=>(parseFloat(b.cbm)||0)-(parseFloat(a.cbm)||0)));
+  const asc = greedyFill([...candidates].sort((a,b)=>(parseFloat(a.cbm)||0)-(parseFloat(b.cbm)||0)));
+  const best = desc.total >= asc.total ? desc : asc;
+
+  // Is there one more order, too big to fit within strict capacity, that
+  // would still be within the bail allowance? If so, suggest it too - it'll
+  // need to go in a bail rather than a box, which gets noted on the container.
+  const dateOk = (o) => {
+    if (!existingRange) return true;
+    const d = parseDate(o.poDelivery);
+    if (!d) return true;
+    return daysBetween(d, existingRange.min) <= groupingWindowDays && daysBetween(d, existingRange.max) <= groupingWindowDays;
+  };
+  const leftoverAfterBest = remaining - best.total;
+  let bailOrder = null, bailOverage = 0;
+  if (overageAllowanceCbm > 0) {
+    const bailCandidates = pool.orders
+      .filter(o => !best.chosen.includes(o.id) && dateOk(o))
+      .filter(o => {
+        const cbm = parseFloat(o.cbm) || 0;
+        return cbm > leftoverAfterBest + 0.001 && cbm <= leftoverAfterBest + overageAllowanceCbm + 0.001;
+      })
+      .sort((a,b)=>(parseFloat(a.cbm)||0)-(parseFloat(b.cbm)||0));
+    if (bailCandidates.length) {
+      bailOrder = bailCandidates[0];
+      bailOverage = (parseFloat(bailOrder.cbm)||0) - leftoverAfterBest;
+    }
+  }
+
+  suggestion = {
+    containerId, orderIds: best.chosen, total: best.total, remaining, maxCbm, used,
+    bailOrderId: bailOrder ? bailOrder.id : null, bailOverage
+  };
+  render();
+  const skipMsg = dateFiltered ? ` (${dateFiltered} skipped - delivery date too far off)` : '';
+  const bailMsg = bailOrder ? ` + 1 more (${bailOrder.styleNo}) would fit if bailed, ${bailOverage.toFixed(1)} CBM over` : '';
+  toast(`Suggested ${best.chosen.length} orders${skipMsg}${bailMsg}`);
+}
+
+function applySuggestion(){
+  if (!suggestion) return;
+  const targetContainer = containers.find(c=>c.id===suggestion.containerId);
+  const ids = [...suggestion.orderIds];
+  ids.forEach(id=>{
+    const found = findOrder(id);
+    if (found) {
+      found.container.orders = found.container.orders.filter(o=>o.id!==id);
+      targetContainer.orders.push(found.order);
+    }
+  });
+  let msg = `Added ${ids.length} orders (${suggestion.total.toFixed(1)} CBM) to ${targetContainer.containerNo}`;
+  if (suggestion.bailOrderId) {
+    const found = findOrder(suggestion.bailOrderId);
+    if (found) {
+      found.container.orders = found.container.orders.filter(o=>o.id!==suggestion.bailOrderId);
+      found.order.bailed = true;
+      targetContainer.orders.push(found.order);
+      const note = `Bail: ${found.order.styleNo} (${found.order.orderNo || 'no order #'}) - over by ${suggestion.bailOverage.toFixed(1)} CBM, auto-suggested`;
+      targetContainer.notes = targetContainer.notes ? `${targetContainer.notes}\n${note}` : note;
+      msg += ` + ${found.order.styleNo} bailed`;
+    }
+  }
+  toast(msg);
+  suggestion = null;
+  render();
+}
+function clearSuggestion(){ suggestion = null; render(); }
+
+function updateField(orderId, field, value){
+  const found = findOrder(orderId);
+  if (found) found.order[field] = value;
+}
+function renameContainer(containerId, value){
+  const c = containers.find(x=>x.id===containerId);
+  if (c) c.containerNo = value;
+}
+function setContainerType(containerId, value){
+  const c = containers.find(x=>x.id===containerId);
+  if (c) { c.containerType = value; render(); }
+}
+function updateContainerNotes(containerId, value){
+  const c = containers.find(x=>x.id===containerId);
+  if (c) c.notes = value; // no render() here - would steal focus mid-typing, see setConceptSearch elsewhere for the same fix
+}
+function toggleBail(orderId){
+  const found = findOrder(orderId);
+  if (!found) return;
+  const { container, order } = found;
+  order.bailed = !order.bailed;
+  const note = `Bail: ${order.styleNo} (${order.orderNo || 'no order #'})`;
+  if (order.bailed) {
+    container.notes = container.notes ? `${container.notes}\n${note}` : note;
+  } else {
+    container.notes = (container.notes || '').split('\n').filter(l=>l.trim() !== note).join('\n');
+  }
+  render();
+}
+
+// ---- Drag and drop: reorder within a container, or move to a different one ----
+function onDragStart(e, orderId){
+  dragSourceId = orderId;
+  e.dataTransfer.effectAllowed = 'move';
+  e.target.closest('tr').classList.add('dragging');
+}
+function onDragEnd(e){ e.target.closest('tr').classList.remove('dragging'); }
+
+function moveOrder(orderId, targetContainerId, targetIndex){
+  const found = findOrder(orderId);
+  if (!found) return;
+  const { container: fromContainer, order } = found;
+  fromContainer.orders = fromContainer.orders.filter(o=>o.id!==orderId);
+  const toContainer = containers.find(c=>c.id===targetContainerId);
+  const idx = (targetIndex==null) ? toContainer.orders.length : targetIndex;
+  toContainer.orders.splice(idx, 0, order);
+  render();
+
+  if (toContainer.id !== 'pool') {
+    const range = containerDateRange(toContainer.orders);
+    if (range && range.spreadDays > groupingWindowDays) {
+      toast(`\u26a0 Added, but delivery dates in ${toContainer.containerNo} now span ${range.spreadDays} days`);
+      return;
+    }
+  }
+  toast(fromContainer.id===targetContainerId ? 'Order reordered' : `Moved to ${toContainer.containerNo}`);
+}
+
+function onDropOnRow(e, targetOrderId){
+  e.preventDefault();
+  if (!dragSourceId || dragSourceId===targetOrderId) return;
+  const targetInfo = findOrder(targetOrderId);
+  if (!targetInfo) return;
+  const idx = targetInfo.container.orders.findIndex(o=>o.id===targetOrderId);
+  moveOrder(dragSourceId, targetInfo.container.id, idx);
+  dragSourceId = null;
+}
+function onDropOnGroup(e, containerId){
+  e.preventDefault();
+  if (!dragSourceId) return;
+  moveOrder(dragSourceId, containerId, null);
+  dragSourceId = null;
+}
+
+// ---- Drawer ----
+function openDrawer(orderId){
+  const found = findOrder(orderId);
+  if (!found) return;
+  currentEdit = orderId;
+  const o = found.order;
+  document.getElementById('drawer-title').textContent = o.styleNo + ' - ' + found.container.containerNo;
+  ['description','colour','units','rsp','sent_to_factory','labdip','fabric_test','fit','preprod','preship',
+   'po_price','rand_excl','roe','landed','profit','margin','supp_inv','supp_inv_date','actual_dc','payment_due','invoice_value','elanza_paid']
+   .forEach(f=>{ const el=document.getElementById('d-'+f); if (el) el.value = o[f]||''; });
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('drawer').classList.add('open');
+}
+function closeDrawer(){
+  document.getElementById('overlay').classList.remove('open');
+  document.getElementById('drawer').classList.remove('open');
+  currentEdit = null;
+}
+function setTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active', p.dataset.panel===name));
+}
+function saveDrawer(){
+  if (!currentEdit) return;
+  const found = findOrder(currentEdit);
+  if (!found) return;
+  ['description','colour','units','rsp','sent_to_factory','labdip','fabric_test','fit','preprod','preship',
+   'po_price','rand_excl','roe','landed','profit','margin','supp_inv','supp_inv_date','actual_dc','payment_due','invoice_value','elanza_paid']
+   .forEach(f=>{ const el=document.getElementById('d-'+f); if (el) found.order[f] = el.value; });
+  render();
+  closeDrawer();
+  toast('Saved');
+}
+
+function addContainer(){
+  const id = 'c' + Date.now();
+  containers.push({ id, containerNo: 'New Container', vessel: 'TBA', containerType: '40FT HQ', notes: '', orders: [] });
+  render();
+  toast('New container added \u2014 set its name and type above, then drag orders in');
+}
+
+function markDelivered(containerId){
+  const c = containers.find(x=>x.id===containerId);
+  if (!c) return;
+  const count = c.orders.length;
+  if (!confirm(`Remove ${c.containerNo} from the schedule? This assumes it's been delivered${count ? ` - it still has ${count} order${count===1?'':'s'} in it` : ''}.`)) return;
+  containers = containers.filter(x=>x.id!==containerId);
+  render();
+  toast(`${c.containerNo} removed`);
+}
+
+render();
+</script>
+</body>
+</html>
