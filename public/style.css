@@ -119,6 +119,22 @@ textarea { resize:vertical; min-height:70px; }
 .ok { color:var(--confirmed); font-size:13px; margin-bottom:10px; }
 .hidden { display:none; }
 
+.test-report-list { display:flex; flex-direction:column; gap:6px; margin-top:6px; }
+.test-report-row {
+  display:flex; justify-content:space-between; align-items:center; gap:12px;
+  padding:10px 12px; border:1px solid var(--line); border-radius:var(--radius);
+  text-decoration:none; color:var(--ink); background:var(--paper-raised);
+}
+.test-report-row:hover { border-color:var(--denim); }
+
+.spec-tree { list-style:none; padding-left:0; margin:6px 0 0; }
+.spec-tree-row {
+  display:flex; justify-content:space-between; align-items:center; gap:12px;
+  padding:7px 10px; border:1px solid var(--line); border-radius:var(--radius);
+  background:var(--paper-raised); margin-bottom:5px;
+}
+.spec-tree-actions { display:flex; gap:4px; flex-shrink:0; }
+
 /* ===== MODAL ===== */
 .modal-back { position:fixed; inset:0; background:rgba(28,33,38,0.4); display:flex; align-items:center; justify-content:center; z-index:50; }
 .modal { background:var(--paper-raised); border-radius:var(--radius); padding:26px; width:380px; max-width:90vw; box-shadow:0 10px 40px rgba(0,0,0,0.2); }
@@ -163,19 +179,26 @@ textarea { resize:vertical; min-height:70px; }
 /* ===== DRAWER ===== */
 .overlay { position:fixed; inset:0; background:rgba(28,33,38,0.35); z-index:40; display:none; }
 .overlay.open { display:block; }
-.drawer { position:fixed; top:0; right:-560px; width:560px; max-width:94vw; height:100vh; background:var(--paper); z-index:41; box-shadow: -8px 0 30px rgba(0,0,0,0.18); transition: right .25s ease; display:flex; flex-direction:column; }
+.drawer { position:fixed; top:0; right:-640px; width:640px; max-width:94vw; height:100vh; background:var(--paper); z-index:41; box-shadow: -8px 0 30px rgba(0,0,0,0.18); transition: right .25s ease; display:flex; flex-direction:column; }
 .drawer.open { right:0; }
 .drawer-head { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; background:var(--paper-raised); }
 .drawer-head h2 { font-size:18px; margin:0; }
 .drawer-close { all:unset; cursor:pointer; font-size:20px; color:var(--ink-soft); padding:4px 8px; }
 .drawer-body { padding:20px 24px; overflow-y:auto; flex:1; }
-.tabs { display:flex; gap:4px; padding:0 24px; background:var(--paper-raised); border-bottom:1px solid var(--line); }
+/* overflow-x:auto rather than letting tabs wrap or clip - the tab count
+   keeps growing (CAD, Wash Care, Fabric Report, Measurements... all added
+   after this drawer's original width was set) and re-widening the drawer
+   every time a tab is added isn't sustainable, so this is the permanent
+   fix: whatever doesn't fit just scrolls horizontally instead of being cut
+   off past the drawer's right edge. flex-shrink:0 on .tab keeps labels from
+   getting squeezed instead of scrolling. */
+.tabs { display:flex; gap:4px; padding:0 24px; background:var(--paper-raised); border-bottom:1px solid var(--line); overflow-x:auto; }
 /* Style drawer's main photo, floated to the left of the drawer panel
    (not inside it) so it stays in view no matter which tab is open. */
 .drawer-float-photo {
-  position:absolute; top:0; right:560px; height:100vh;
+  position:absolute; top:0; right:640px; height:100vh;
   display:flex; align-items:center; justify-content:center;
-  padding:24px; z-index:41; pointer-events:none;
+  padding:24px; z-index:41; pointer-events:none; background:#fff;
 }
 .drawer-float-photo img {
   max-width:100%; max-height:100%; object-fit:contain; cursor:pointer;
@@ -198,7 +221,7 @@ textarea { resize:vertical; min-height:70px; }
 @media (max-width: 780px) {
   .drawer-float-photo { display:none; }
 }
-.tab { all:unset; cursor:pointer; padding:11px 4px; margin-right:18px; font-size:12.5px; font-weight:600; color:var(--ink-soft); border-bottom:2px solid transparent; }
+.tab { all:unset; cursor:pointer; padding:11px 4px; margin-right:18px; font-size:12.5px; font-weight:600; color:var(--ink-soft); border-bottom:2px solid transparent; white-space:nowrap; flex-shrink:0; }
 .tab.active { color:var(--ink); border-bottom-color: var(--chalk); }
 .tab-panel { display:none; }
 .tab-panel.active { display:block; }
@@ -406,7 +429,12 @@ footer.drawer-actions { padding:16px 24px; border-top:1px solid var(--line); bac
 .position-buyer { background:#DCE6F0; color:#1F3350; }
 .position-planner { background:#EFE3EE; color:#7A3E74; }
 .position-qc { background:#E6EEE9; color:var(--confirmed); }
+.position-factory { background:#F1E4E4; color:#A63A3A; }
 .position-other { background:var(--line-soft); color:var(--ink-soft); }
+.qr-status-badge { font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:9px; text-transform:uppercase; letter-spacing:0.02em; }
+.qr-status-awaiting { background:#F5EAD2; color:#8A6A16; }
+.qr-status-received { background:#E1EBE6; color:var(--confirmed); }
+.qr-type-badge { font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:9px; letter-spacing:0.01em; background:var(--line-soft); color:var(--ink-soft); white-space:nowrap; }
 .buyer-result { margin-top:6px; padding:10px 12px; border-radius:var(--radius); font-size:12.5px; }
 .buyer-result.found { background:#EAF3DE; border:1px solid #C0DD97; color:#27500A; }
 .buyer-result.multi { background:#E6F1FB; border:1px solid #B5D4F4; color:#0C447C; }

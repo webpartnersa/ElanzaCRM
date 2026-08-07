@@ -7,8 +7,28 @@ function initConceptsState(){
 
 async function loadConcepts(){
   initConceptsState();
-  const { concepts } = await api('/api/concepts');
+  // Fabrics normally only loads up front for users with the separate
+  // 'fabrics' section permission (app.js's init()) - the Concept drawer's
+  // Fabric dropdown needs that same list, so fetch it here too (skipped
+  // gracefully if this user can't reach Fabrics at all, since routes/
+  // fabrics.js 403s otherwise and would sink the whole Promise.all).
+  const canSeeFabrics = hasPerm(state.user, 'fabrics');
+  // Factory dropdown source (see the Cost tab's Factory field below) - a
+  // buyer never sees the Factory field at all (stripped server-side), and
+  // the endpoint 403s them anyway, so skip the request entirely for them.
+  const canSeeFactory = state.user.role !== 'buyer';
+  const [{ concepts }, { categories }, { ranges }, fabricsResult, factoryResult] = await Promise.all([
+    api('/api/concepts'),
+    api('/api/spec-categories'),
+    api('/api/size-ranges'),
+    canSeeFabrics ? api('/api/fabrics') : Promise.resolve(null),
+    canSeeFactory ? api('/api/concepts/factory-names') : Promise.resolve(null),
+  ]);
   state.concepts = concepts;
+  state.specCategories = categories;
+  state.sizeRanges = ranges;
+  if (fabricsResult) state.fabrics = fabricsResult.fabrics;
+  if (factoryResult) state.factoryNames = factoryResult.factories;
   render();
 }
 
@@ -33,6 +53,8 @@ function renderConceptsView(){
           ${DEPARTMENTS.map(d=>`<option value="${d}" ${state.departmentFilterConcepts===d?'selected':''}>${d}</option>`).join('')}
         </select>
         <input id="concept-search" placeholder="Search description or tags..." value="${state.conceptSearch}" oninput="setConceptSearch(this.value)" style="width:220px;"/>
+        ${canCreate ? `<button class="btn btn-ghost" onclick="openSpecManager()">Manage Spec Hierarchy</button>` : ''}
+        ${canCreate ? `<button class="btn btn-ghost" onclick="openSizeManager()">Manage Size Ranges</button>` : ''}
         ${canCreate ? `<button class="btn btn-primary" onclick="openNewConcept()">+ New Concept</button>` : ''}
       </div>
     </div>
@@ -40,6 +62,7 @@ function renderConceptsView(){
       ${filtered.map(renderConceptCard).join('') || '<div class="empty-state">No concepts yet.</div>'}
     </div>
     ${renderConceptDrawerHost()}
+    ${renderSizeManagerHost()}
   `;
 }
 
@@ -49,7 +72,7 @@ function renderConceptCard(c){
       ${c.cover_photo ? `<img class="concept-thumb" src="${c.cover_photo}"/>` : `<div class="concept-thumb concept-thumb-empty">No photo</div>`}
       ${c.has_cad ? `<span class="cad-badge">CAD</span>` : ''}
       <div class="concept-card-body">
-        <div class="concept-no mono">${c.concept_no}${c.favourite ? ' \u2605' : ''}</div>
+        <div class="concept-no mono">${c.concept_no}</div>
         <div class="concept-desc">${c.description || '(no description)'}</div>
         <div class="badge">${c.department}</div>
       </div>
@@ -70,12 +93,23 @@ function setConceptSearch(v){
 
 // ---- Concept drawer (its own overlay, independent of the style drawer) ----
 function blankConceptDraft(){
-  return { id:null, department:DEPARTMENTS[0], description:'', source:'', tags:'', concept_date: new Date().toISOString().slice(0,7), cost_estimate:'', factory:'', shipping_date:'', favourite:0 };
+  const draft = { id:null, department:DEPARTMENTS[0], description:'', source:'', concept_date: new Date().toISOString().slice(0,7), cost_estimate:'', factory:'', shipping_date:'', size_range_id:'', fabric_code:'', composition:'', weight:'', buyer_rand_target:'', buyer_rsp_target:'', factory_target_price:'', factory_price:'', factory_cost_options:'' };
+  CONCEPT_DETAIL_FIELDS.forEach(f => { draft[f.key] = ''; });
+  return draft;
 }
 
 async function openConcept(id){
-  const { concept, photos, conversions } = await api('/api/concepts/'+id);
-  state.conceptDrawer = { concept, photos, conversions, isNew:false, lightboxIndex:null, tab:'details' };
+  // requests fetched alongside everything else so the Requests tab has its
+  // history ready the moment it's clicked - tab switches only toggle CSS
+  // visibility, they don't re-render (see setConceptDrawerTab), so this
+  // can't be lazy-loaded on tab click without a special case there.
+  // .catch() degrades gracefully for buyers (403'd, tab isn't shown to them
+  // anyway - see canEdit gating in renderConceptDrawerBody).
+  const [{ concept, photos, conversions }, requestsRes] = await Promise.all([
+    api('/api/concepts/'+id),
+    api('/api/concepts/'+id+'/requests').catch(() => ({ requests: [] })),
+  ]);
+  state.conceptDrawer = { concept, photos, conversions, requests: requestsRes.requests || [], isNew:false, lightboxIndex:null, tab:'details', specCategoryId: concept.spec_category_id || null, floatPhotoId: null };
   render();
 }
 // Nothing is created in the database until Save is clicked - the concept
@@ -86,7 +120,7 @@ async function openConcept(id){
 // needed) so they can be shown as real thumbnails before upload, and
 // uploaded for real only after the concept exists.
 function openNewConcept(){
-  state.conceptDrawer = { concept: blankConceptDraft(), photos: [], conversions: [], isNew:true, pendingFiles:[], lightboxIndex:null, tab:'details' };
+  state.conceptDrawer = { concept: blankConceptDraft(), photos: [], conversions: [], isNew:true, pendingFiles:[], lightboxIndex:null, tab:'details', specCategoryId: null, floatPendingIndex: 0 };
   render();
 }
 // DOM-only tab switch, same fix as the Style drawer's setDrawerTab - both
@@ -120,11 +154,89 @@ function renderConceptDrawerHost(){
   const photos = d ? d.photos : [];
   return `
     <div class="overlay ${open?'open':''}" onclick="closeConceptDrawer()"></div>
+    ${open ? renderConceptFloatPhoto() : ''}
     <div class="drawer ${open?'open':''}">
       ${open ? renderConceptDrawerContent() : ''}
     </div>
     ${(lightboxIndex!=null && photos[lightboxIndex]) ? renderConceptLightbox(photos, lightboxIndex) : ''}
   `;
+}
+
+// Floats the enlarged photo to the left of the drawer, same "floats outside
+// the drawer's own column" positioning as the Style drawer's
+// renderFloatingMainPhoto() (drawer.js) - reuses its exact CSS classes.
+// Which photo shows is driven by clicking a thumbnail below (setConceptFloatPhoto/
+// setConceptFloatPending) or by this panel's own prev/next arrows. Handles
+// both an existing concept's real (uploaded) photos - tracked by photo id so
+// it survives reorders - and a brand-new concept's not-yet-uploaded
+// pendingFiles, tracked by array index since those have no id yet.
+function renderConceptFloatPhoto(){
+  const d = state.conceptDrawer;
+  if (!d) return '';
+  if (d.isNew) {
+    const list = d.pendingFiles || [];
+    if (!list.length) return '';
+    const idx = Math.min(d.floatPendingIndex || 0, list.length - 1);
+    d.floatPendingIndex = idx;
+    const current = list[idx];
+    const hasMultiple = list.length > 1;
+    return `
+      <div class="drawer-float-photo">
+        ${hasMultiple ? `<button class="float-photo-nav prev" onclick="event.stopPropagation(); shiftConceptFloatPending(-1)">&#8249;</button>` : ''}
+        <img src="${current.url}"/>
+        ${hasMultiple ? `<button class="float-photo-nav next" onclick="event.stopPropagation(); shiftConceptFloatPending(1)">&#8250;</button>` : ''}
+        ${hasMultiple ? `<div class="float-photo-count">${idx+1} / ${list.length}</div>` : ''}
+      </div>`;
+  }
+  const list = (d.photos || []).filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+  if (!list.length) return '';
+  let idx = list.findIndex(p => p.id === d.floatPhotoId);
+  if (idx === -1) idx = 0;
+  d.floatPhotoId = list[idx].id;
+  const current = list[idx];
+  const hasMultiple = list.length > 1;
+  return `
+    <div class="drawer-float-photo">
+      ${hasMultiple ? `<button class="float-photo-nav prev" onclick="event.stopPropagation(); shiftConceptFloatPhoto(-1)">&#8249;</button>` : ''}
+      <img src="${current.path}" onclick="openConceptLightbox(${d.photos.indexOf(current)})"/>
+      ${hasMultiple ? `<button class="float-photo-nav next" onclick="event.stopPropagation(); shiftConceptFloatPhoto(1)">&#8250;</button>` : ''}
+      ${hasMultiple ? `<div class="float-photo-count">${idx+1} / ${list.length}</div>` : ''}
+    </div>`;
+}
+// Patches just the floating photo element - same reasoning as
+// setConceptDrawerTab: a full render() would rebuild every field from
+// state.conceptDrawer.concept and drop anything typed but unsaved.
+function shiftConceptFloatPhoto(delta){
+  const d = state.conceptDrawer;
+  const list = (d.photos || []).filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+  if (!list.length) return;
+  let idx = list.findIndex(p => p.id === d.floatPhotoId);
+  if (idx === -1) idx = 0;
+  idx = (idx + delta + list.length) % list.length;
+  d.floatPhotoId = list[idx].id;
+  const el = document.querySelector('.drawer-float-photo');
+  if (el) el.outerHTML = renderConceptFloatPhoto();
+}
+function setConceptFloatPhoto(photoId){
+  state.conceptDrawer.floatPhotoId = photoId;
+  const el = document.querySelector('.drawer-float-photo');
+  if (el) el.outerHTML = renderConceptFloatPhoto();
+  else render();
+}
+function shiftConceptFloatPending(delta){
+  const d = state.conceptDrawer;
+  const list = d.pendingFiles || [];
+  if (!list.length) return;
+  const cur = d.floatPendingIndex || 0;
+  d.floatPendingIndex = (cur + delta + list.length) % list.length;
+  const el = document.querySelector('.drawer-float-photo');
+  if (el) el.outerHTML = renderConceptFloatPhoto();
+}
+function setConceptFloatPending(index){
+  state.conceptDrawer.floatPendingIndex = index;
+  const el = document.querySelector('.drawer-float-photo');
+  if (el) el.outerHTML = renderConceptFloatPhoto();
+  else render();
 }
 
 function renderConceptLightbox(photos, index){
@@ -179,7 +291,486 @@ async function updateConceptPhotoRole(conceptId, photoId, role){
   } catch(e) { toast(e.message); }
 }
 
-function renderConceptDrawerContent(){
+// Simple text/textarea/date fields with no cross-field wiring - single
+// source of truth for the drawer's inputs plus the sync/save paths below,
+// so adding one only means editing this list once. Fabric/Composition/
+// Weight and Spec/Sizes are handled separately since they have their own
+// autofill/cascading wiring.
+const CONCEPT_DETAIL_FIELDS = [
+  { key:'wash', label:'Wash', type:'textarea' },
+  { key:'colour', label:'Colour', type:'textarea' },
+  { key:'print', label:'Print', type:'textarea' },
+  { key:'embroidery_applique', label:'Embroidery / Applique', type:'textarea' },
+  { key:'topstitching', label:'Topstitching', type:'textarea' },
+  { key:'trims', label:'Trims', type:'textarea' },
+  { key:'styling', label:'Styling', type:'textarea' },
+  { key:'units', label:'Units', type:'text' },
+  { key:'packing', label:'Packing', type:'textarea' },
+  { key:'labels', label:'Labels', type:'textarea' },
+  { key:'dc_date', label:'DC Date', type:'date' },
+];
+function renderConceptDetailField(key, canEdit){
+  const f = CONCEPT_DETAIL_FIELDS.find(x=>x.key===key);
+  const v = state.conceptDrawer.concept[f.key] || '';
+  const id = 'cf-'+f.key;
+  // Print/Embroidery-Applique drive the fabric-report-requirement banner
+  // below them - live, via oninput, without a full render() (same
+  // reasoning as updateConceptMargin). DC Date drives Shipping Date the
+  // same way - see updateConceptShippingDateFromDc.
+  const onchange = (key === 'print' || key === 'embroidery_applique') ? ` oninput="updateFabricReportRequirement()"`
+    : (key === 'dc_date') ? ` onchange="updateConceptShippingDateFromDc()"` : '';
+  if (f.type === 'textarea') return `<div class="field"><label>${f.label}</label><textarea id="${id}" ${canEdit?'':'disabled'}${onchange}>${v}</textarea></div>`;
+  if (f.type === 'date') return `<div class="field"><label>${f.label}</label><input type="date" id="${id}" value="${v}" ${canEdit?'':'disabled'}${onchange}/></div>`;
+  return `<div class="field"><label>${f.label}</label><input id="${id}" value="${v}" ${canEdit?'':'disabled'}/></div>`;
+}
+
+// Whenever a concept has Print or Embroidery/Applique details, an
+// additional Print/Embellishment fabric report is required on top of the
+// base/bulk fabric report (see routes/fabrics.js's fabric_test_reports.
+// report_type) - this banner is a reminder, not an automated compliance
+// check against what's actually been uploaded.
+function conceptNeedsPrintReport(c){
+  return !!((c.print && c.print.trim()) || (c.embroidery_applique && c.embroidery_applique.trim()));
+}
+function renderFabricReportRequirement(needsReport){
+  return needsReport
+    ? `<div class="hint" style="color:var(--stitch-red);font-weight:700;">⚠ Print or Embroidery/Applique has details - an additional Print/Embellishment fabric report is required, on top of the base fabric report.</div>`
+    : `<div class="hint">No print or embroidery/applique details entered - the base fabric report is sufficient.</div>`;
+}
+// Called via oninput on the Print/Embroidery-Applique fields - reads
+// straight from the DOM (both fields already exist there by the time this
+// fires) and patches only this one div, same reasoning as
+// updateConceptMargin: no full render(), so nothing typed elsewhere in the
+// drawer is ever at risk.
+function updateFabricReportRequirement(){
+  const c = {
+    print: document.getElementById('cf-print').value,
+    embroidery_applique: document.getElementById('cf-embroidery_applique').value,
+  };
+  const el = document.getElementById('cf-fabric-report-requirement');
+  if (el) el.innerHTML = renderFabricReportRequirement(conceptNeedsPrintReport(c));
+}
+
+// Margin the buyer makes = (RSP - what they pay us) / RSP - standard retail
+// margin math. Buyer Rand Target is entered ex VAT, but RSP is VAT-inclusive
+// (it's what the shopper pays), so VAT (15%) is added to the rand figure
+// before comparing the two - otherwise the margin comes out overstated.
+// Purely derived from the two Buyer Rand/RSP Target fields, so it's never
+// stored on its own - just recomputed for display, live as either field
+// changes (updateConceptMargin patches only the display span, not the wider
+// drawer, so typing here never risks losing anything typed elsewhere in the
+// drawer - see patchConceptDrawerBody's reasoning).
+const VAT_RATE = 0.15;
+function computeConceptMargin(rand, rsp){
+  const r = parseFloat(rand), s = parseFloat(rsp);
+  if (!r || !s || isNaN(r) || isNaN(s)) return null;
+  const randInclVat = r * (1 + VAT_RATE);
+  return ((s - randInclVat) / s) * 100;
+}
+function formatConceptMargin(rand, rsp){
+  const m = computeConceptMargin(rand, rsp);
+  return m === null ? '—' : m.toFixed(1) + '%';
+}
+function updateConceptMargin(){
+  const rand = document.getElementById('cf-buyer_rand_target').value;
+  const rsp = document.getElementById('cf-buyer_rsp_target').value;
+  const el = document.getElementById('cf-margin-display');
+  if (el) el.textContent = formatConceptMargin(rand, rsp);
+}
+
+// DC Date is the one actually set by hand - Shipping Date defaults to 55
+// days before it, same "live default, stays freely editable afterward"
+// pattern as the fabric-code autofill (onConceptFabricPicked) rather than
+// a locked/computed-only field, in case a real shipment ends up needing a
+// different date than the flat 55-day rule.
+function updateConceptShippingDateFromDc(){
+  const dcEl = document.getElementById('cf-dc_date');
+  const shipEl = document.getElementById('cf-shipping_date');
+  if (!dcEl || !shipEl || !dcEl.value) return;
+  const d = new Date(dcEl.value + 'T00:00:00');
+  d.setDate(d.getDate() - 55);
+  shipEl.value = d.toISOString().slice(0, 10);
+}
+
+// Factory dropdown, sourced from Contacts' Factory-position company names
+// (see GET /api/concepts/factory-names) rather than free text - keeps this
+// field consistent with whatever's saved in Contacts instead of drifting
+// into ad hoc spellings. If the concept already has a factory name saved
+// that isn't (or isn't yet) in Contacts - e.g. older data, or the contact
+// got renamed - that value is still shown as a selectable option so it
+// isn't silently dropped, just flagged as unmatched.
+function renderConceptFactorySelect(current){
+  const names = state.factoryNames || [];
+  const known = names.includes(current);
+  const opts = [`<option value="">— Select factory —</option>`];
+  if (current && !known) opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (not in Contacts)</option>`);
+  names.forEach(n => opts.push(`<option value="${escapeHtml(n)}" ${n===current?'selected':''}>${escapeHtml(n)}</option>`));
+  return `<select id="cf-factory">${opts.join('')}</select>`;
+}
+
+function escapeHtml(s){
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ---- Costing request: everything the factory needs to quote, built from
+// this concept's saved Details + Costing fields. Deliberately excludes
+// Buyer Rand/RSP Target (and the % margin derived from them) - that's this
+// business's own retail pricing, not something to hand to the factory
+// while asking them for a price. This plain-text version is the
+// text/plain clipboard fallback for the HTML table version below, used by
+// the "Copy to clipboard" button - a deliberate second path alongside
+// "Send costing request" for when the user wants to add a custom message
+// or otherwise edit the email before it actually goes out. ----
+// Only ever emits a line for a field that actually has a value - an empty
+// concept field means the label is skipped entirely, not shown blank/with
+// a "-" placeholder. Weight, Composition, and Cost estimate (R) are
+// deliberately left out of the costing request altogether (not just
+// blank-skipped) - Cost estimate is this business's own internal Rand
+// figure, not something to hand to the factory when asking them to quote.
+function costingField(label, value){
+  return (value != null && String(value).trim()) ? [`${label}: ${value}`] : [];
+}
+function generateConceptCostingDoc(c){
+  return [
+    `QUOTATION REQUEST`,
+    `Concept: ${c.concept_no} - ${c.description||''}`,
+    ...costingField('Department', c.department),
+    ...costingField('Shipping Date', c.shipping_date),
+    ``,
+    `DETAILS`,
+    ...costingField('Fabric code', c.fabric_code),
+    ...costingField('Colour', c.colour),
+    ...costingField('Wash', c.wash),
+    ...costingField('Print', c.print),
+    ...costingField('Embroidery/Applique', c.embroidery_applique),
+    ...costingField('Topstitching', c.topstitching),
+    ...costingField('Trims', c.trims),
+    ...costingField('Styling', c.styling),
+    ...costingField('Units', c.units),
+    ...costingField('Packing', c.packing),
+    ...costingField('Labels', c.labels),
+    ...costingField('Source', c.source),
+    ...(c.spec_category_id ? costingField('Spec / Measurements', specCategoryPath(c.spec_category_id)) : []),
+    ``,
+    `QUOTATION`,
+    ...costingField('Factory Target $ Price', c.factory_target_price ? '$'+c.factory_target_price : ''),
+    ...costingField('Factory $ Price (quoted)', c.factory_price ? '$'+c.factory_price : ''),
+    ...(c.factory_cost_options ? [``, `Factory cost options / alternatives:`, c.factory_cost_options] : []),
+  ].join('\n');
+}
+
+// mailto: bodies are plain-text-only (RFC 6068) - there's no way to get a
+// formatted, image-carrying body into an email through a mailto: link, in
+// any browser. This builds a table-based, fully inline-styled HTML document
+// instead and puts it on the clipboard alongside the plain-text fallback, so
+// pasting into the opened draft carries the formatting and photos across -
+// the closest a webpage can get to "email with photos" without actually
+// sending the email itself. Table + inline-style (no <style> block, no
+// classes) is deliberate: Gmail/Outlook's paste handlers strip external and
+// class-based CSS but preserve inline styles on table cells.
+function loadImageAsDataUrl(src){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('Could not load ' + src));
+    img.src = src;
+  });
+}
+
+// Brand palette for the pasted-into-email document.
+const EMAIL_DENIM = '#2F4869';
+const EMAIL_DENIM_DEEP = '#1F3350';
+const EMAIL_STITCH_RED = '#A63A3A';
+const EMAIL_INK = '#1C2126';
+const EMAIL_INK_SOFT = '#4A5058';
+const EMAIL_LINE = '#D8D6CE';
+const EMAIL_LINE_SOFT = '#E8E7E0';
+
+// Chinese on hold for now (2026-08-06) - emailFieldRow/emailSectionHeading
+// still take labelZh/valueZh (every call site below still passes them) but
+// no longer render them, so a single-column English layout comes out
+// without touching the ~20 call sites in buildCostingEmailHtml below. Twin
+// of the same on-hold change in lib/conceptCostingEmailHtml.js (server-side
+// send path) - this is the client-side "Copy to clipboard" path.
+function emailFieldRow(labelEn, labelZh, valueEn, valueZh){
+  if (!(valueEn != null && String(valueEn).trim())) return '';
+  const en = escapeHtml(valueEn).replace(/\r?\n/g, '<br>');
+  return `<tr>
+    <td style="width:100%;padding:10px 0;border-bottom:1px solid ${EMAIL_LINE_SOFT};vertical-align:top;">
+      <div style="font-size:9px;font-weight:bold;letter-spacing:.04em;text-transform:uppercase;color:${EMAIL_DENIM};margin:0 0 3px 0;">${escapeHtml(labelEn)}</div>
+      <div style="font-size:13px;color:${EMAIL_INK};line-height:1.45;">${en}</div>
+    </td>
+  </tr>`;
+}
+function emailSectionHeading(labelEn, labelZh){
+  return `<tr>
+    <td style="padding:18px 0 6px 0;">
+      <div style="font-size:12.5px;font-weight:bold;color:${EMAIL_DENIM_DEEP};">${escapeHtml(labelEn)}</div>
+      <div style="border-bottom:2px solid ${EMAIL_STITCH_RED};width:28px;margin-top:5px;font-size:1px;line-height:1px;">&nbsp;</div>
+    </td>
+  </tr>`;
+}
+// Builds the full pasted-into-email document: letterhead, then every field
+// as a matched EN/ZH row (same field set and order as generateConceptCostingDoc
+// above), then one block per photo. `t` is the server's AI-translated field
+// values and `labels` its static LABELS map (see
+// /api/concepts/:id/costing-email-data / lib/conceptCostingTranslate.js).
+function buildCostingEmailHtml(c, specPath, t, labels, logoDataUrl, photoBlocksHtml){
+  const title = `${c.concept_no} - Quotation Request`;
+  const subtitle = [c.description, c.department, c.concept_date].filter(Boolean).join('  ·  ');
+  const money = v => v ? '' + v : '';
+
+  const rows = [
+    emailFieldRow(labels.shippingDate.en, labels.shippingDate.zh, c.shipping_date, c.shipping_date),
+    emailFieldRow('Description', '款式描述', c.description, t.description),
+    emailSectionHeading(labels.details.en, labels.details.zh),
+    emailFieldRow(labels.fabricCode.en, labels.fabricCode.zh, c.fabric_code, c.fabric_code),
+    emailFieldRow(labels.colour.en, labels.colour.zh, c.colour, t.colour),
+    emailFieldRow(labels.wash.en, labels.wash.zh, c.wash, t.wash),
+    emailFieldRow(labels.print.en, labels.print.zh, c.print, t.print),
+    emailFieldRow(labels.embroidery.en, labels.embroidery.zh, c.embroidery_applique, t.embroidery_applique),
+    emailFieldRow(labels.topstitching.en, labels.topstitching.zh, c.topstitching, t.topstitching),
+    emailFieldRow(labels.trims.en, labels.trims.zh, c.trims, t.trims),
+    emailFieldRow(labels.styling.en, labels.styling.zh, c.styling, t.styling),
+    emailFieldRow(labels.units.en, labels.units.zh, c.units, c.units),
+    emailFieldRow(labels.source.en, labels.source.zh, c.source, t.source),
+    emailFieldRow(labels.packing.en, labels.packing.zh, c.packing, t.packing),
+    emailFieldRow(labels.labels.en, labels.labels.zh, c.labels, t.labels),
+    emailFieldRow(labels.spec.en, labels.spec.zh, specPath, t.specPath),
+    emailSectionHeading(labels.costing.en, labels.costing.zh),
+    emailFieldRow(labels.factoryTarget.en, labels.factoryTarget.zh, c.factory_target_price ? '$' + money(c.factory_target_price) : '', c.factory_target_price ? '$' + money(c.factory_target_price) : ''),
+    emailFieldRow(labels.factoryQuoted.en, labels.factoryQuoted.zh, c.factory_price ? '$' + money(c.factory_price) : '', c.factory_price ? '$' + money(c.factory_price) : ''),
+    emailFieldRow(labels.factoryOptions.en, labels.factoryOptions.zh, c.factory_cost_options, t.factory_cost_options),
+  ].join('');
+
+  const logoImg = logoDataUrl
+    ? `<img src="${logoDataUrl}" height="34" style="display:block;border:0;" alt="Elanzas">`
+    : `<div style="font-size:16px;font-weight:bold;letter-spacing:.08em;color:${EMAIL_DENIM_DEEP};">ELANZAS</div>`;
+
+  return `<table width="700" cellpadding="0" cellspacing="0" border="0" style="width:700px;max-width:100%;font-family:Arial,Helvetica,sans-serif;border-collapse:collapse;">
+    <tr>
+      <td style="border-bottom:2px solid ${EMAIL_DENIM_DEEP};padding-bottom:12px;">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td style="vertical-align:middle;">${logoImg}</td>
+          <td align="right" style="vertical-align:bottom;">
+            <div style="font-size:16px;font-weight:bold;color:${EMAIL_DENIM_DEEP};">${escapeHtml(title)}</div>
+            ${subtitle ? `<div style="font-size:10.5px;color:${EMAIL_INK_SOFT};margin-top:4px;">${escapeHtml(subtitle)}</div>` : ''}
+          </td>
+        </tr></table>
+      </td>
+    </tr>
+    <tr><td>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">${rows}</table>
+    </td></tr>
+    ${photoBlocksHtml}
+    <tr><td style="border-top:1px solid ${EMAIL_LINE};padding-top:10px;">
+      <div style="font-size:9.5px;color:${EMAIL_INK_SOFT};">Elanzas &middot; Quotation Request</div>
+    </td></tr>
+  </table>`;
+}
+
+async function emailConceptCostingRequest(){
+  const c = state.conceptDrawer.concept;
+  const subject = `Quotation - ${c.concept_no} - ${c.description||''}`;
+  const photos = (state.conceptDrawer.photos || []).filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+  const bodyText = generateConceptCostingDoc(c);
+
+  toast('Preparing quotation request...');
+  try {
+    const [dataRes, logoDataUrl, imageDataUrls] = await Promise.all([
+      fetch('/api/concepts/' + c.id + '/costing-email-data').then(r => {
+        if (!r.ok) return r.json().catch(() => ({})).then(d => Promise.reject(new Error(d.error || 'Failed to prepare costing request')));
+        return r.json();
+      }),
+      loadImageAsDataUrl('/img/main-LOGO-transparent.PNG').catch(() => null),
+      Promise.all(photos.map(p => loadImageAsDataUrl(p.path).catch(() => null))),
+    ]);
+    const validImages = imageDataUrls.filter(Boolean);
+    const labels = dataRes.labels;
+    const photoBlocksHtml = validImages.map((url, i) => {
+      const capEn = `${labels.referencePhoto.en} ${i + 1} OF ${validImages.length}`;
+      return `<tr><td style="padding-top:16px;">
+        <div style="font-size:9px;font-weight:bold;color:${EMAIL_DENIM};">${escapeHtml(capEn)}</div>
+        <img src="${url}" style="max-width:660px;width:100%;height:auto;display:block;margin-top:6px;border:1px solid ${EMAIL_LINE};" alt="">
+      </td></tr>`;
+    }).join('');
+
+    const html = buildCostingEmailHtml(dataRes.concept, dataRes.specPath, dataRes.translations || {}, labels, logoDataUrl, photoBlocksHtml);
+
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([bodyText], { type: 'text/plain' }),
+      })
+    ]);
+    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}`;
+    toast('Quotation request copied - paste (Cmd/Ctrl+V) into the email body');
+  } catch(e) {
+    toast('Could not prepare the quotation request: ' + e.message);
+  }
+}
+
+// Inline "who does this go to" step before actually sending (see
+// POST /api/concepts/:id/send-request) - never fires the send without the
+// user seeing and confirming a recipient first, even when a saved Factory
+// contact auto-matches. Prefill comes from GET /:id/factory-contact
+// matching this concept's free-text Factory field against saved Factory
+// contacts' company names (see routes/concepts.js). Shared by every request
+// type (see openRequestComposer) - only the Cost type skips the message
+// box, since its body is built from the concept's own Details/Costing
+// fields instead (see emailConceptCostingRequest / the send-request route).
+// Every successful send is logged server-side to concept_requests and
+// immediately reflected in this tab's own history list below - see the
+// Requests nav section (public/js/requests.js) for the all-concepts view.
+function renderRequestComposer(){
+  const d = state.conceptDrawer;
+  const composer = d.composer;
+  if (!composer) return '';
+  const isCost = composer.type === 'cost';
+  const contactOpts = (composer.contacts || []).filter(c => c.email).map(c =>
+    `<option value="${c.email}">${c.first_name} ${c.last_name} - ${c.company || ''}</option>`
+  ).join('');
+  return `
+    <div class="field" style="margin-top:14px;background:var(--line-soft);padding:12px;border-radius:var(--radius);">
+      <label>${REQUEST_TYPES[composer.type].en}</label>
+      ${isCost
+        ? `<div class="hint" style="margin:2px 0 0;">Built from this concept's saved Details and Costing fields - save first if you've just made changes.</div>`
+        : `<textarea id="cf-request-message" placeholder="What do you need from the factory?" style="margin-top:6px;">${escapeHtml(composer.message||'')}</textarea>`}
+      <label style="margin-top:10px;display:block;">Send to</label>
+      <input id="cf-request-to" value="${composer.to || ''}" placeholder="factory@example.com" list="cf-request-to-list"/>
+      <datalist id="cf-request-to-list">${contactOpts}</datalist>
+      ${composer.matchName
+        ? `<div class="hint" style="margin-top:4px;">Matched saved contact: ${composer.matchName}</div>`
+        : `<div class="hint" style="margin-top:4px;">No saved Factory contact matched this concept's Factory field (${escapeHtml(d.concept.factory || '(not set)')}) - pick a saved contact above or type an email. Add factory contacts under Contacts.</div>`}
+      <div class="row-actions" style="margin-top:10px;">
+        <button class="btn btn-ghost" onclick="closeRequestComposer()">Cancel</button>
+        ${isCost ? `<button class="btn btn-ghost" onclick="emailConceptCostingRequest()">Copy to clipboard</button>` : ''}
+        <button class="btn btn-primary" onclick="sendRequestNow()">Send</button>
+      </div>
+    </div>`;
+}
+async function openRequestComposer(type){
+  const d = state.conceptDrawer;
+  d.composer = { type, to: '', matchName: '', contacts: [], message: '' };
+  patchConceptDrawerBody();
+  try {
+    const { match, factoryContacts } = await api('/api/concepts/' + d.concept.id + '/factory-contact');
+    d.composer.contacts = factoryContacts || [];
+    if (match && match.email) {
+      d.composer.to = match.email;
+      d.composer.matchName = `${match.first_name} ${match.last_name}${match.company ? ' - ' + match.company : ''}`;
+    }
+    patchConceptDrawerBody();
+  } catch(e) { /* composer still usable without a prefill */ }
+}
+function closeRequestComposer(){
+  if (state.conceptDrawer) state.conceptDrawer.composer = null;
+  patchConceptDrawerBody();
+}
+// Stays in the drawer on success (rather than navigating away to the main
+// Requests list, like the very first version of this did) - the concept's
+// own request history right below the composer is now the confirmation
+// that the send went out, and staying put means sending a second request
+// type for the same concept (e.g. cost, then a sample request once the
+// price works) doesn't mean re-opening the drawer from scratch.
+async function sendRequestNow(){
+  const d = state.conceptDrawer;
+  const composer = d.composer;
+  const to = document.getElementById('cf-request-to').value.trim();
+  if (!to) { toast('Enter a recipient email'); return; }
+  let message = '';
+  if (composer.type !== 'cost') {
+    message = document.getElementById('cf-request-message').value.trim();
+    if (!message) { toast('Enter a message for this request'); return; }
+  }
+  try {
+    toast('Sending ' + REQUEST_TYPES[composer.type].en.toLowerCase() + '...');
+    await api('/api/concepts/' + d.concept.id + '/send-request', { method:'POST', body: JSON.stringify({ request_type: composer.type, to, message }) });
+    toast(REQUEST_TYPES[composer.type].en + ' sent to ' + to);
+    d.composer = null;
+    await loadConceptRequests();
+  } catch(e) {
+    toast('Could not send: ' + e.message);
+  }
+}
+
+// This concept's own request history - fetched up front in openConcept()
+// so it's ready the moment the Requests tab is clicked (tab switches just
+// toggle CSS visibility, they don't re-render - see setConceptDrawerTab),
+// and re-fetched here after a send or a status/reminder action so the tab
+// reflects it immediately without needing the whole drawer reopened.
+async function loadConceptRequests(){
+  const d = state.conceptDrawer;
+  if (!d || !d.concept || !d.concept.id) return;
+  try {
+    const { requests } = await api('/api/concepts/' + d.concept.id + '/requests');
+    d.requests = requests;
+    patchConceptDrawerBody();
+  } catch(e) { /* non-critical - tab just shows nothing until this succeeds */ }
+}
+
+function renderConceptRequestsTab(){
+  const d = state.conceptDrawer;
+  const requests = d.requests || [];
+  const typeButtons = Object.keys(REQUEST_TYPES).map(type =>
+    `<button class="btn btn-ghost btn-sm" onclick="openRequestComposer('${type}')">${REQUEST_TYPES[type].en}</button>`
+  ).join(' ');
+
+  const rows = requests.map(r => `
+    <tr onclick="openRequestDetail(${r.id})" style="cursor:pointer;">
+      <td><span class="qr-type-badge">${requestTypeLabel(r.request_type)}</span></td>
+      <td>${r.sent_to}</td>
+      <td class="mono">${new Date(r.created_at).toLocaleDateString()}</td>
+      <td><span class="qr-status-badge qr-status-${r.status === 'received' ? 'received' : 'awaiting'}">${r.status === 'received' ? 'Received' : 'Awaiting'}</span></td>
+      <td style="text-align:right;">
+        ${r.status !== 'received' ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); remindRequest(${r.id})">Remind${r.reminder_count ? ` (${r.reminder_count})` : ''}</button>` : ''}
+      </td>
+    </tr>
+  `).join('') || `<tr><td colspan="5"><div class="empty-state">No requests sent yet for this concept.</div></td></tr>`;
+
+  return `
+    <div class="field"><label>Send a new request</label></div>
+    <div class="row-actions" style="flex-wrap:wrap;row-gap:8px;">${typeButtons}</div>
+    ${renderRequestComposer()}
+    <div class="field" style="margin-top:22px;"><label>Sent so far</label></div>
+    <table class="contacts-table">
+      <thead><tr><th>Type</th><th>Sent to</th><th>Sent</th><th>Status</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+// Live lookup against the already-loaded fabrics list, same pattern as
+// onFabricCodePicked() in shipping.js - unconditionally overwrites
+// composition/weight on pick, but both stay freely editable afterward.
+// The field itself is a datalist-backed input rather than a strict <select>
+// so a fabric that isn't in the database yet can still be typed in by hand.
+function onConceptFabricPicked(code){
+  syncConceptDraftFromDom();
+  const d = state.conceptDrawer;
+  d.concept.fabric_code = code;
+  const fab = (state.fabrics||[]).find(f=>f.code===code);
+  if (fab) {
+    d.concept.composition = fab.composition || '';
+    d.concept.weight = fab.weight || '';
+  }
+  patchConceptDrawerBody();
+}
+
+// Just the .drawer-body's inner content (both tab panels, or the single
+// details view for a not-yet-created concept) - split out from
+// renderConceptDrawerContent() so field changes that need to redraw part of
+// the form (spec picker, department, fabric autofill) can patch only this
+// via patchConceptDrawerBody() instead of a full render(), which would
+// destroy and recreate .drawer-body and reset its scroll position back to
+// the top every time.
+function renderConceptDrawerBody(){
   const { concept: c, photos, conversions, isNew, tab, pendingFiles } = state.conceptDrawer;
   const canEdit = state.user.role !== 'buyer';
   const currentTab = tab || 'details';
@@ -194,7 +785,7 @@ function renderConceptDrawerContent(){
           ondragstart="conceptPhotoDragStart(event, ${p.id})"
           ondragover="event.preventDefault()"
           ondrop="conceptPhotoDrop(event, ${p.id})">
-          <img class="photo-thumb" src="${p.path}" onclick="openConceptLightbox(${i})"/>
+          <img class="photo-thumb" src="${p.path}" onclick="setConceptFloatPhoto(${p.id})"/>
           ${photos[0] && photos[0].id===p.id ? `<span class="cover-badge">Main</span>` : ''}
           ${canEdit ? `<button class="photo-remove" onclick="event.stopPropagation(); removeConceptPhoto(${c.id}, ${p.id})">&times;</button>` : ''}
           ${canEdit ? `
@@ -218,7 +809,7 @@ function renderConceptDrawerContent(){
     <div class="photo-grid">
       ${pendingFiles.map((p,i)=>`
         <div class="photo-thumb-wrap">
-          <img class="photo-thumb" src="${p.url}"/>
+          <img class="photo-thumb" src="${p.url}" onclick="setConceptFloatPending(${i})"/>
           <button class="photo-remove" onclick="removePendingConceptPhoto(${i})">&times;</button>
         </div>
       `).join('')}
@@ -244,10 +835,44 @@ function renderConceptDrawerContent(){
 
       <div class="field">
         <label>Department</label>
-        <select id="cf-department" ${canEdit?'':'disabled'}>${deptOptions}</select>
+        <select id="cf-department" ${canEdit?'':'disabled'} onchange="onConceptDeptChange(this.value)">${deptOptions}</select>
         ${!isNew ? `<div class="hint" style="margin-top:4px;">Changing this reassigns the concept code (currently ${c.concept_no}) to match the new department.</div>` : ''}
       </div>
       <div class="field"><label>Description</label><textarea id="cf-description" ${canEdit?'':'disabled'}>${c.description||''}</textarea></div>
+      <div class="field">
+        <label>Fabric</label>
+        <select id="cf-fabric_code" onchange="onConceptFabricPicked(this.value)" ${canEdit?'':'disabled'}>
+          <option value="" ${!c.fabric_code?'selected':''}>-</option>
+          ${(state.fabrics||[]).map(f=>`<option value="${f.code}" ${c.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
+        </select>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Composition</label><input id="cf-composition" value="${c.composition||''}" ${canEdit?'':'disabled'}/></div>
+        <div class="field"><label>Weight (oz)</label><input id="cf-weight" value="${c.weight||''}" ${canEdit?'':'disabled'}/></div>
+      </div>
+      ${renderConceptDetailField('wash', canEdit)}
+      ${renderConceptDetailField('colour', canEdit)}
+      ${renderConceptDetailField('print', canEdit)}
+      ${renderConceptDetailField('embroidery_applique', canEdit)}
+      <div id="cf-fabric-report-requirement" class="field">${renderFabricReportRequirement(conceptNeedsPrintReport(c))}</div>
+      ${renderConceptDetailField('topstitching', canEdit)}
+      ${renderConceptDetailField('trims', canEdit)}
+      ${renderConceptDetailField('styling', canEdit)}
+      <div class="field">
+        <label>Spec</label>
+        ${renderSpecSelector(c.department, state.conceptDrawer.specCategoryId)}
+      </div>
+      ${renderConceptDetailField('units', canEdit)}
+      <div class="field">
+        <label>Sizes</label>
+        <select id="cf-size_range_id" ${canEdit?'':'disabled'}>
+          <option value="">-</option>
+          ${(state.sizeRanges||[]).map(r=>`<option value="${r.id}" ${String(c.size_range_id)===String(r.id)?'selected':''}>${r.values.join(' / ')}</option>`).join('')}
+        </select>
+        <div class="hint" style="margin-top:4px;"><a href="javascript:void(0)" onclick="openSizeManager()">manage size ranges</a></div>
+      </div>
+      ${renderConceptDetailField('packing', canEdit)}
+      ${renderConceptDetailField('labels', canEdit)}
       <div class="field"><label>Source</label>
         <select id="cf-source" ${canEdit?'':'disabled'}>
           <option value="" ${!c.source?'selected':''}>-</option>
@@ -256,17 +881,14 @@ function renderConceptDrawerContent(){
           <option value="Bought-in reference" ${c.source==='Bought-in reference'?'selected':''}>Bought-in reference</option>
         </select>
       </div>
-      <div class="field"><label>Tags (comma separated)</label><input id="cf-tags" value="${c.tags||''}" ${canEdit?'':'disabled'}/></div>
       <div class="field"><label>Concept date</label><input type="month" id="cf-concept_date" value="${c.concept_date||''}" ${canEdit?'':'disabled'}/></div>
       ${canEdit ? `
+        <div class="field"><label>Factory</label>${renderConceptFactorySelect(c.factory)}</div>
         <div class="row2">
-          <div class="field"><label>Cost estimate (R)</label><input id="cf-cost_estimate" value="${c.cost_estimate||''}"/></div>
-          <div class="field"><label>Factory</label><input id="cf-factory" value="${c.factory||''}"/></div>
+          ${renderConceptDetailField('dc_date', canEdit)}
+          <div class="field"><label>Shipping Date</label><input type="date" id="cf-shipping_date" value="${c.shipping_date||''}"/></div>
         </div>
-        <div class="field"><label>Shipping Date</label><input type="date" id="cf-shipping_date" value="${c.shipping_date||''}"/></div>
-        <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-bottom:14px;">
-          <input type="checkbox" id="cf-favourite" ${c.favourite?'checked':''}/> Favourite
-        </label>
+        <div class="hint" style="margin-top:-8px;">Shipping Date is set automatically to 55 days before DC Date - editable afterward if it needs adjusting.</div>
       ` : ''}
       ${!isNew && conversions && conversions.length ? `
         <div class="field"><label>Converted to</label>
@@ -280,6 +902,29 @@ function renderConceptDrawerContent(){
         </div>
         <div class="hint" style="margin-top:6px;">Saves this concept and generates a CAD from its first two reference photos, in the background.</div>
       ` : ''}`;
+
+  // Everything money-related lives here rather than in Details, per the
+  // user's request to manage costs/target/price in one place. % Margin is
+  // never stored - see computeConceptMargin/updateConceptMargin above.
+  const costsTabHtml = canEdit ? `
+      <div class="field"><label>Cost estimate (R)</label><input id="cf-cost_estimate" value="${c.cost_estimate||''}"/></div>
+      <div class="row2">
+        <div class="field"><label>Buyer Rand Target</label><input id="cf-buyer_rand_target" value="${c.buyer_rand_target||''}" oninput="updateConceptMargin()"/></div>
+        <div class="field"><label>Buyer RSP Target</label><input id="cf-buyer_rsp_target" value="${c.buyer_rsp_target||''}" oninput="updateConceptMargin()"/></div>
+      </div>
+      <div class="field">
+        <label>% Margin</label>
+        <div id="cf-margin-display" style="font-size:15px;font-weight:700;color:var(--ink);padding:6px 0;">${formatConceptMargin(c.buyer_rand_target, c.buyer_rsp_target)}</div>
+        <div class="hint" style="margin-top:2px;">The % margin the buyer makes, from Buyer Rand Target (ex VAT, 15% added for this calc) vs Buyer RSP Target - recalculates as you type, nothing saved separately.</div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Factory Target $ Price</label><input id="cf-factory_target_price" value="${c.factory_target_price||''}"/></div>
+        <div class="field"><label>Factory $ Price</label><input id="cf-factory_price" value="${c.factory_price||''}"/></div>
+      </div>
+      <div class="field"><label>Factory Cost Options</label><textarea id="cf-factory_cost_options">${c.factory_cost_options||''}</textarea></div>
+  ` : '';
+
+  const requestsTabHtml = !isNew ? renderConceptRequestsTab() : `<div class="hint" style="margin-top:18px;">Save this concept first to send a request to the factory.</div>`;
 
   const cadPhoto = (photos||[]).find(p=>p.role==='cad');
   const cadIndex = cadPhoto ? photos.indexOf(cadPhoto) : -1;
@@ -318,6 +963,19 @@ function renderConceptDrawerContent(){
         ` : ''}
       ` : ''}`;
 
+  return isNew ? detailsTabHtml + costsTabHtml + requestsTabHtml : `
+    <div class="tab-panel ${currentTab==='details'?'active':''}" data-tab="details">${detailsTabHtml}</div>
+    ${canEdit ? `<div class="tab-panel ${currentTab==='costs'?'active':''}" data-tab="costs">${costsTabHtml}</div>` : ''}
+    ${canEdit ? `<div class="tab-panel ${currentTab==='requests'?'active':''}" data-tab="requests">${requestsTabHtml}</div>` : ''}
+    <div class="tab-panel ${currentTab==='cad'?'active':''}" data-tab="cad">${cadTabHtml}</div>
+  `;
+}
+
+function renderConceptDrawerContent(){
+  const { concept: c, photos, isNew, tab } = state.conceptDrawer;
+  const canEdit = state.user.role !== 'buyer';
+  const currentTab = tab || 'details';
+  const hasCad = (photos||[]).some(p=>p.role==='cad');
   return `
     <div class="drawer-head">
       <h2>${isNew ? 'New Concept' : c.concept_no}</h2>
@@ -326,20 +984,27 @@ function renderConceptDrawerContent(){
     ${!isNew ? `
       <div class="tabs">
         <button class="tab ${currentTab==='details'?'active':''}" data-tab="details" onclick="setConceptDrawerTab('details')">Details</button>
+        ${canEdit ? `<button class="tab ${currentTab==='costs'?'active':''}" data-tab="costs" onclick="setConceptDrawerTab('costs')">Costs</button>` : ''}
+        ${canEdit ? `<button class="tab ${currentTab==='requests'?'active':''}" data-tab="requests" onclick="setConceptDrawerTab('requests')">Requests</button>` : ''}
         <button class="tab ${currentTab==='cad'?'active':''}" data-tab="cad" onclick="setConceptDrawerTab('cad')">CAD${hasCad?' \u2713':''}</button>
       </div>
     ` : ''}
-    <div class="drawer-body">
-      ${isNew ? detailsTabHtml : `
-        <div class="tab-panel ${currentTab==='details'?'active':''}" data-tab="details">${detailsTabHtml}</div>
-        <div class="tab-panel ${currentTab==='cad'?'active':''}" data-tab="cad">${cadTabHtml}</div>
-      `}
-    </div>
+    <div class="drawer-body">${renderConceptDrawerBody()}</div>
     <footer class="drawer-actions">
       ${(!isNew && canEdit) ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deleteConcept(${c.id}, '${c.concept_no}')">Delete</button>` : ''}
       ${(!isNew && canEdit) ? `<button class="btn btn-ghost" onclick="convertConceptToStyle(${c.id})">Convert to style</button>` : ''}
       ${canEdit ? `<button class="btn btn-primary" onclick="saveConcept()">${isNew ? 'Create concept' : 'Save changes'}</button>` : ''}
     </footer>`;
+}
+
+// Patches just .drawer-body's contents, preserving its scroll position -
+// same reasoning as shiftConceptFloatPhoto patching .drawer-float-photo
+// instead of calling render(). Falls back to a full render() if the drawer
+// isn't actually open (shouldn't happen, but cheap to guard).
+function patchConceptDrawerBody(){
+  const el = document.querySelector('.drawer.open .drawer-body');
+  if (!el) { render(); return; }
+  el.innerHTML = renderConceptDrawerBody();
 }
 
 // ---- CAD tab: main AI/uploaded image, labeled detail-photo sidebar, and
@@ -509,13 +1174,23 @@ async function downloadCadFile(){
 function syncConceptDraftFromDom(){
   const d = state.conceptDrawer;
   if (!d) return;
-  const fields = ['department','description','source','tags','concept_date','cost_estimate','factory','shipping_date'];
+  const fields = ['department','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
+    'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)];
   fields.forEach(f => {
     const el = document.getElementById('cf-'+f);
     if (el) d.concept[f] = el.value;
   });
-  const favEl = document.getElementById('cf-favourite');
-  if (favEl) d.concept.favourite = favEl.checked ? 1 : 0;
+  d.concept.spec_category_id = d.specCategoryId;
+}
+
+// A different department means a different spec tree entirely - the old
+// pick almost certainly doesn't belong to it, so it's cleared rather than
+// left pointing at a leaf from the wrong department.
+function onConceptDeptChange(value){
+  syncConceptDraftFromDom();
+  state.conceptDrawer.concept.department = value;
+  state.conceptDrawer.specCategoryId = null;
+  patchConceptDrawerBody();
 }
 
 // Photos chosen before the concept exists are held as { file, url } pairs -
@@ -552,12 +1227,12 @@ async function saveConcept(){
       const formData = new FormData();
       formData.append('department', department);
       formData.append('description', document.getElementById('cf-description').value);
-      ['source','tags','concept_date','cost_estimate','factory','shipping_date'].forEach(f => {
+      ['source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
+       'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {
         const el = document.getElementById('cf-'+f);
         if (el) formData.append(f, el.value);
       });
-      const favEl = document.getElementById('cf-favourite');
-      formData.append('favourite', (favEl && favEl.checked) ? '1' : '0');
+      formData.append('spec_category_id', state.conceptDrawer.specCategoryId || '');
       pending.forEach(entry => formData.append('photos', entry.file));
 
       const res = await fetch('/api/concepts', { method:'POST', body: formData });
@@ -580,16 +1255,13 @@ async function saveConcept(){
 
   try {
     const body = {
-      department: document.getElementById('cf-department') ? document.getElementById('cf-department').value : undefined,
-      description: document.getElementById('cf-description') ? document.getElementById('cf-description').value : undefined,
-      source: document.getElementById('cf-source') ? document.getElementById('cf-source').value : undefined,
-      tags: document.getElementById('cf-tags') ? document.getElementById('cf-tags').value : undefined,
-      concept_date: document.getElementById('cf-concept_date') ? document.getElementById('cf-concept_date').value : undefined,
-      cost_estimate: document.getElementById('cf-cost_estimate') ? document.getElementById('cf-cost_estimate').value : undefined,
-      factory: document.getElementById('cf-factory') ? document.getElementById('cf-factory').value : undefined,
-      shipping_date: document.getElementById('cf-shipping_date') ? document.getElementById('cf-shipping_date').value : undefined,
-      favourite: document.getElementById('cf-favourite') ? (document.getElementById('cf-favourite').checked ? 1 : 0) : undefined,
+      spec_category_id: state.conceptDrawer.specCategoryId,
     };
+    ['department','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
+     'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {
+      const el = document.getElementById('cf-'+f);
+      if (el) body[f] = el.value;
+    });
     await api('/api/concepts/'+c.id, { method:'PUT', body: JSON.stringify(body) });
     toast('Saved');
     closeConceptDrawer();
@@ -638,15 +1310,13 @@ async function saveAndGenerateCad(){
   const photoIds = [referencePhotos[0].id, referencePhotos[1].id];
 
   const body = {
-    description: document.getElementById('cf-description') ? document.getElementById('cf-description').value : undefined,
-    source: document.getElementById('cf-source') ? document.getElementById('cf-source').value : undefined,
-    tags: document.getElementById('cf-tags') ? document.getElementById('cf-tags').value : undefined,
-    concept_date: document.getElementById('cf-concept_date') ? document.getElementById('cf-concept_date').value : undefined,
-    cost_estimate: document.getElementById('cf-cost_estimate') ? document.getElementById('cf-cost_estimate').value : undefined,
-    factory: document.getElementById('cf-factory') ? document.getElementById('cf-factory').value : undefined,
-    shipping_date: document.getElementById('cf-shipping_date') ? document.getElementById('cf-shipping_date').value : undefined,
-    favourite: document.getElementById('cf-favourite') ? (document.getElementById('cf-favourite').checked ? 1 : 0) : undefined,
+    spec_category_id: state.conceptDrawer.specCategoryId,
   };
+  ['description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
+   'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {
+    const el = document.getElementById('cf-'+f);
+    if (el) body[f] = el.value;
+  });
 
   const conceptId = c.id;
   const conceptNo = c.concept_no;
@@ -718,11 +1388,13 @@ async function deleteCadPhoto(conceptId, photoId){
   } catch(e) { toast(e.message); }
 }
 
-// Opens the existing New Style drawer, pre-filled from this concept. On
-// save, drawer.js's saveStyle() logs the conversion back here and copies
-// the concept's photos onto the new style automatically.
+// Opens the existing New Style drawer, pre-filled from this concept - every
+// field the Style drawer's Details tab shares with Concepts' own Details tab
+// gets mapped across (see CONCEPT_TO_STYLE_FIELDS in drawer.js), not just
+// department/description. On save, drawer.js's saveStyle() logs the
+// conversion back here and copies the concept's photos onto the new style.
 function convertConceptToStyle(conceptId){
   const c = state.conceptDrawer.concept;
   closeConceptDrawer();
-  openNewStyle({ department: c.department, description: c.description, conceptId: c.id, conceptNo: c.concept_no });
+  openNewStyle({ department: c.department, conceptId: c.id, conceptNo: c.concept_no, fromConcept: c });
 }

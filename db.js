@@ -5,6 +5,22 @@ const path = require('path');
 const db = new Database(path.join(__dirname, 'docket-portal.db'));
 db.pragma('journal_mode = WAL');
 
+// One-time rename: this table started out cost-request-only
+// (concept_quotation_requests) and has grown into a general factory
+// communication log (cost/sample/PP sample/bulk sample/fabric test - see
+// request_type below). Has to run before the schema block's own
+// "CREATE TABLE IF NOT EXISTS concept_requests" so an existing install's
+// real sent-request history gets renamed onto rather than orphaned under
+// the old name once that statement creates a fresh empty table under the
+// new one.
+(function renameQuotationRequestsTable() {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('concept_quotation_requests','concept_requests')").all().map(r => r.name);
+  if (tables.includes('concept_quotation_requests') && !tables.includes('concept_requests')) {
+    db.exec('ALTER TABLE concept_quotation_requests RENAME TO concept_requests');
+    console.log('Renamed concept_quotation_requests to concept_requests');
+  }
+})();
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +78,93 @@ CREATE TABLE IF NOT EXISTS concepts (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- Self-referencing tree used to build the Concepts drawer's cascading
+  -- "Spec" picker: root nodes (parent_id NULL) are the top-level categories
+  -- under one department (e.g. Ladies -> Denim), children nest to whatever
+  -- depth is needed (Denim -> Skinny), and the deepest node a concept picks
+  -- is stored as concepts.spec_category_id. A leaf's actual point-of-measure
+  -- bank lives in spec_category_poms below.
+  CREATE TABLE IF NOT EXISTS spec_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department TEXT NOT NULL,
+    parent_id INTEGER REFERENCES spec_categories(id),
+    name TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- The reference measurement bank for a leaf spec category (e.g. "Denim
+  -- Shorts") - one row per point of measure (e.g. "1/2 WAIST RELAXED") with
+  -- its target "spec to be" value, in the order they appear on the buyer's
+  -- appraisal sheet. Copied onto a style (see style_spec_poms) the moment
+  -- that style picks this category, rather than referenced live, so a later
+  -- correction to the bank doesn't silently rewrite a spec a factory is
+  -- already quoting or fitting against.
+  CREATE TABLE IF NOT EXISTS spec_category_poms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spec_category_id INTEGER NOT NULL REFERENCES spec_categories(id),
+    name TEXT NOT NULL,
+    spec_to_be TEXT,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- A style's own copy of its spec category's POM bank at the moment it was
+  -- picked (see styles.spec_category_id, ensured further down) - frozen,
+  -- not a live reference, for the same reason spec_category_poms itself
+  -- isn't read live elsewhere.
+  CREATE TABLE IF NOT EXISTS style_spec_poms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    style_id INTEGER NOT NULL REFERENCES styles(id),
+    name TEXT NOT NULL,
+    spec_to_be TEXT,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- One row per style per fit stage (1st Fit / 2nd Fit / Seal-PPS - see the
+  -- fixed SPEC_FIT_STAGES list in routes/styles.js) - the merchandiser fills
+  -- this in, once per stage, either by typing values in by hand or
+  -- uploading the buyer's filled fit sheet (file_path/source record which).
+  -- Re-recording a stage replaces its values rather than adding a second
+  -- row, since there's only ever one "current" measurement per style per
+  -- stage - UNIQUE enforces that.
+  CREATE TABLE IF NOT EXISTS style_spec_fits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    style_id INTEGER NOT NULL REFERENCES styles(id),
+    stage TEXT NOT NULL,
+    fit_date TEXT,
+    notes TEXT,
+    source TEXT DEFAULT 'manual',
+    file_path TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(style_id, stage)
+  );
+  CREATE TABLE IF NOT EXISTS style_spec_fit_values (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fit_id INTEGER NOT NULL REFERENCES style_spec_fits(id),
+    pom_id INTEGER NOT NULL REFERENCES style_spec_poms(id),
+    actual_value TEXT,
+    UNIQUE(fit_id, pom_id)
+  );
+
+  -- Named, ordered size sets (e.g. "S / M / L" or "S / M / L / XL") that a
+  -- concept picks one of via concepts.size_range_id - lets each concept use
+  -- whichever size breakdown actually applies instead of free-typed sizes.
+  CREATE TABLE IF NOT EXISTS size_ranges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS size_range_values (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    size_range_id INTEGER NOT NULL REFERENCES size_ranges(id),
+    value TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+  );
+
   CREATE TABLE IF NOT EXISTS concept_photos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     concept_id INTEGER NOT NULL REFERENCES concepts(id),
@@ -76,7 +179,55 @@ CREATE TABLE IF NOT EXISTS concepts (
     style_no TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
-  
+
+  -- One row per factory communication sent from a concept - cost/quotation
+  -- requests, sample requests, PP sample requests, bulk sample requests,
+  -- fabric test report requests (see routes/requests.js's send-request
+  -- route, and REQUEST_TYPES in lib/conceptCostingTranslate.js for the
+  -- fixed type list). The whole point is an audit trail of what was
+  -- actually sent to a factory and when - concept_no/concept_description
+  -- are snapshotted here rather than joined live, same reasoning as
+  -- concept_conversions.style_no: the concept's own fields can keep
+  -- changing after the fact without rewriting history. The html column is
+  -- the exact rendered email body (photos included, as base64 data URIs)
+  -- so "view the email content" later shows precisely what the factory
+  -- received, not a re-render that could drift if the concept was edited
+  -- since. message is only set for the non-cost types (cost requests build
+  -- their body from the concept's own Details/Costing fields instead - see
+  -- lib/conceptCostingEmailHtml.js), kept alongside html so a reminder
+  -- email can reference what was actually asked for in plain text.
+  CREATE TABLE IF NOT EXISTS concept_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_id INTEGER NOT NULL REFERENCES concepts(id),
+    concept_no TEXT NOT NULL,
+    concept_description TEXT,
+    request_type TEXT NOT NULL DEFAULT 'cost',
+    message TEXT,
+    sent_to TEXT NOT NULL,
+    sent_by_name TEXT,
+    subject TEXT NOT NULL,
+    html TEXT NOT NULL,
+    resend_id TEXT,
+    status TEXT NOT NULL DEFAULT 'awaiting',
+    received_at TEXT,
+    reminder_count INTEGER NOT NULL DEFAULT 0,
+    last_reminder_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- Every individual reminder nudge sent for a request - concept_requests'
+  -- own reminder_count/last_reminder_at only ever kept the tally and the
+  -- most recent date, not the full history of when each one went out. One
+  -- row per send, same "row count = how many times" pattern as order_delays
+  -- above. sent_by_name mirrors concept_requests.sent_by_name (whoever
+  -- clicked Remind, not necessarily who sent the original request).
+  CREATE TABLE IF NOT EXISTS request_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL REFERENCES concept_requests(id),
+    sent_by_name TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id TEXT PRIMARY KEY,
     redirect_uris TEXT NOT NULL,
@@ -99,6 +250,20 @@ CREATE TABLE IF NOT EXISTS concepts (
     access_token TEXT PRIMARY KEY,
     refresh_token TEXT,
     client_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    expires_at INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- A voice/chat caller who verified their PIN (see routes/mcp.js's
+  -- identify_user_by_pin) gets one of these in exchange - every other MCP
+  -- tool then requires it, so the call is authenticated as that specific
+  -- user for its duration, same idea as oauth_tokens above but issued by
+  -- PIN instead of OAuth. Deliberately short-lived (see expires_at, set at
+  -- issue time) since it's the only thing standing between a bare MCP_TOKEN/
+  -- OAuth connection and acting as a real named person.
+  CREATE TABLE IF NOT EXISTS mcp_pin_sessions (
+    token TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
     expires_at INTEGER NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -146,6 +311,25 @@ CREATE TABLE IF NOT EXISTS concepts (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- Factories used to just be a handful of Contacts rows tagged
+  -- position='Factory' with a free-text 'company' name, mixed in with buyer/
+  -- planner/QC contacts (see routes/contacts.js). This is the real entity -
+  -- name is Elanzas' own internal reference name (what concepts.factory/
+  -- styles.factory free text gets matched against), registered_name is the
+  -- factory's actual legal/registered name (what would go on official
+  -- paperwork like a Material Submission form). The people who work there
+  -- stay as ordinary 'contacts' rows (still position='Factory'), just linked
+  -- via factory_id below instead of a loosely-typed matching company string.
+  CREATE TABLE IF NOT EXISTS factories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    registered_name TEXT,
+    address TEXT,
+    certifications TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
   -- Every time an order's shipment date (po_delivery_date) gets pushed out
   -- after already being set, one row is logged here with why - replaces the
   -- old "13 June was 6 June was 30 May..." run-on text the source spreadsheet
@@ -160,28 +344,100 @@ CREATE TABLE IF NOT EXISTS concepts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
-  -- Base fabrics in use (e.g. code "3895"), each with its composition and
-  -- lab approval report - the report is only valid 12 months from
-  -- approval_date, computed at read time rather than stored, so there's
-  -- nothing to keep in sync if the 12-month rule ever changes.
+  -- Base fabrics in use (e.g. code "3895") - just the code, composition and
+  -- weight (oz). Everything report-specific (approval dates, report
+  -- numbers, style/buyer, validity) lives per-report on
+  -- fabric_test_reports instead, since a fabric can have many reports over
+  -- time and the fabrics row itself isn't the place to track any one of them.
   CREATE TABLE IF NOT EXISTS fabrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
     composition TEXT,
-    report_number TEXT,
-    approval_date TEXT,
+    weight TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- Full history of every lab test report ever uploaded for a fabric code -
+  -- a fabric gets retested per style/order over time, so this keeps every
+  -- past report (with its extracted data and the original PDF) rather than
+  -- only the single "current" report_number/approval_date kept on fabrics
+  -- itself (which this table's most recent row for a code keeps in sync).
+  CREATE TABLE IF NOT EXISTS fabric_test_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fabric_code TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    report_number TEXT,
+    style_no TEXT,
+    end_buyer TEXT,
+    sample_description TEXT,
+    report_date TEXT,
+    testing_period_start TEXT,
+    testing_period_end TEXT,
+    weight_gsm TEXT,
+    weight_oz TEXT,
+    composition TEXT,
+    overall_result TEXT,
+    report_type TEXT DEFAULT 'base',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- One report can cover multiple styles - the same fabric is often tested
+  -- once and used across e.g. "PG054/PG061" - so this is a many-to-many
+  -- join, not a single column. Populated automatically from each report's
+  -- style_no free text (see routes/fabrics.js's relinkReportStyles), plus
+  -- manual link/unlink from a style's own Fabric Report tab.
+  CREATE TABLE IF NOT EXISTS fabric_report_styles (
+    report_id INTEGER NOT NULL REFERENCES fabric_test_reports(id) ON DELETE CASCADE,
+    style_id INTEGER NOT NULL REFERENCES styles(id) ON DELETE CASCADE,
+    PRIMARY KEY (report_id, style_id)
+  );
+
+  -- Raised when a newly-uploaded report's fabric code already exists but its
+  -- composition or weight doesn't match what's on file (see routes/fabrics.js's
+  -- POST /test-reports) - unlike the Notification Centre's other alerts,
+  -- this describes a one-time event at upload time, not a re-derivable
+  -- current state, so it has to be a real stored row rather than computed
+  -- fresh from current data each time.
+  CREATE TABLE IF NOT EXISTS fabric_report_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fabric_code TEXT NOT NULL,
+    report_id INTEGER REFERENCES fabric_test_reports(id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
+
+// One-time backfill: auto-link every already-uploaded report to every style
+// whose number appears in its (possibly multi-code, e.g. "PG054/PG061")
+// style_no text - idempotent (INSERT OR IGNORE), safe to run on every
+// startup, so reports uploaded before this feature existed still show up
+// under their styles without needing to be re-uploaded.
+(function backfillFabricReportStyles() {
+  const styles = db.prepare('SELECT id, style_no FROM styles').all();
+  const reports = db.prepare("SELECT id, style_no FROM fabric_test_reports WHERE style_no IS NOT NULL AND style_no != ''").all();
+  const insert = db.prepare('INSERT OR IGNORE INTO fabric_report_styles (report_id, style_id) VALUES (?, ?)');
+  reports.forEach(r => {
+    const tokens = r.style_no.split(/[/,;\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+    styles.forEach(s => {
+      if (tokens.includes((s.style_no || '').toUpperCase())) insert.run(r.id, s.id);
+    });
+  });
+})();
 
 // Fields a buyer session is allowed to see. Everything else (cost, margin,
 // factory) is stripped server-side before a buyer response is ever sent -
-// this is the enforcement point, not the frontend.
+// this is the enforcement point, not the frontend. Mirrors which fields the
+// Details tab itself hides from buyers (public/js/drawer.js) - factory,
+// shipping_date and dc_date are wrapped in a canEdit check there and must
+// stay off this list too, or the frontend hiding would be cosmetic only.
+// target_rsp stays even though the Details tab no longer edits it - it's
+// still shown read-only on the Style Pipeline board card.
 const BUYER_VISIBLE_STYLE_FIELDS = [
-  'id', 'style_no', 'retailer', 'department', 'buyer', 'description',
-  'stage', 'fabric', 'colour', 'wash', 'units', 'target_rsp',
-  'first_ship', 'first_delivery', 'updated_at', 'cover_photo'
+  'id', 'style_no', 'retailer', 'department', 'buyer', 'description', 'stage',
+  'fabric_code', 'composition', 'weight', 'wash', 'colour', 'print', 'embroidery_applique',
+  'topstitch', 'trims', 'styling', 'units', 'size_range_id', 'packing', 'labels', 'source', 'tags', 'concept_date',
+  'target_rsp', 'first_ship', 'first_delivery', 'updated_at', 'cover_photo'
 ];
 
 // Adds a column to an existing table without touching any data, only if it
@@ -191,6 +447,13 @@ function ensureColumn(table, column, definition) {
   if (!cols.some(c => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     console.log(`Added column ${column} to ${table}`);
+  }
+}
+function dropColumnIfExists(table, column) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (cols.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    console.log(`Dropped column ${column} from ${table}`);
   }
 }
 // Orders imported from the source ORDER SCHEDULE spreadsheet use an older
@@ -225,6 +488,67 @@ function ensureOrdersStyleIdNullable() {
 }
 ensureOrdersStyleIdNullable();
 
+// Contacts started as buyer-side only (retailer+department both required -
+// see the position/retailer/department scoping in routes/contacts.js), but
+// factory contacts (for the costing-request send-by-email feature) don't
+// have either - they get a free-text company name instead (the new
+// `company` column below). Same table-rebuild technique as
+// ensureOrdersStyleIdNullable, for the same reason (SQLite can't drop a
+// NOT NULL constraint in place).
+function ensureContactsRetailerDeptNullable() {
+  const info = db.prepare("PRAGMA table_info(contacts)").all();
+  const retailerCol = info.find(c => c.name === 'retailer');
+  if (!retailerCol || retailerCol.notnull === 0) return;
+  console.log('Migrating contacts.retailer/department to nullable...');
+  const cols = info.map(c => {
+    let def = c.name + ' ' + c.type;
+    if (c.name === 'id') def += ' PRIMARY KEY AUTOINCREMENT';
+    if (c.dflt_value !== null) def += ' DEFAULT ' + c.dflt_value;
+    return def;
+  });
+  const colNames = info.map(c => c.name).join(', ');
+  db.transaction(() => {
+    db.exec('CREATE TABLE contacts_new (' + cols.join(', ') + ')');
+    db.exec('INSERT INTO contacts_new (' + colNames + ') SELECT ' + colNames + ' FROM contacts');
+    db.exec('DROP TABLE contacts');
+    db.exec('ALTER TABLE contacts_new RENAME TO contacts');
+  })();
+  console.log('contacts.retailer/department are now nullable');
+}
+ensureContactsRetailerDeptNullable();
+ensureColumn('contacts', 'company', 'TEXT');
+// Links a position='Factory' contact to its real factories row (see the
+// factories table above) - supersedes the old free-text `company` column
+// for matching purposes, though `company` is left in place unused (this
+// app never drops columns) rather than migrated/cleared.
+ensureColumn('contacts', 'factory_id', 'INTEGER');
+
+// Free-text job title at the factory (e.g. "Merchandiser", "QC Manager",
+// "Owner") - distinct from the fixed `position` enum above, which just
+// categorizes this row as a Factory contact within the app, not what the
+// person actually does there.
+ensureColumn('contacts', 'job_title', 'TEXT');
+
+// One-time backfill: any pre-existing position='Factory' contact (from
+// before the factories table existed) gets a real factories row created
+// from its old `company` name, or matched onto one that already shares that
+// name, and linked via factory_id. Idempotent - only touches rows that
+// still have no factory_id.
+(function migrateFactoryContactsToFactoriesTable() {
+  const orphans = db.prepare("SELECT * FROM contacts WHERE position = 'Factory' AND factory_id IS NULL").all();
+  if (!orphans.length) return;
+  const findFactory = db.prepare('SELECT id FROM factories WHERE name = ? COLLATE NOCASE');
+  const insertFactory = db.prepare('INSERT INTO factories (name) VALUES (?)');
+  const linkContact = db.prepare('UPDATE contacts SET factory_id = ? WHERE id = ?');
+  orphans.forEach(c => {
+    const name = (c.company || `${c.first_name} ${c.last_name}`).trim();
+    let factory = findFactory.get(name);
+    let factoryId = factory ? factory.id : insertFactory.run(name).lastInsertRowid;
+    linkContact.run(factoryId, c.id);
+  });
+  console.log(`Migrated ${orphans.length} Factory contact(s) into the factories table`);
+})();
+
 ensureColumn('concept_photos', 'sort_order', 'INTEGER DEFAULT 0');
 ensureColumn('concept_photos', 'role', "TEXT DEFAULT 'reference'"); // 'reference' | 'detail' | 'cad' | 'cad_detail'
 ensureColumn('concept_photos', 'label', 'TEXT'); // used by 'cad_detail' photos, e.g. "BUTTON DETAIL"
@@ -239,11 +563,73 @@ ensureColumn('concepts', 'cad_description', 'TEXT');
 // legacy rather than dropped) with a real date - "Shipping Date" is a
 // specific date, not a note like "8 weeks ex-factory".
 ensureColumn('concepts', 'shipping_date', 'TEXT');
+ensureColumn('concepts', 'spec_category_id', 'INTEGER');
+ensureColumn('concepts', 'size_range_id', 'INTEGER');
+// Full field set for the single-drawer concept form - fabric_code/
+// composition/weight mirror the fabrics lookup pattern already used on
+// orders (routes/shipping.js), just added here too since concepts didn't
+// have any fabric linkage before.
+['fabric_code', 'composition', 'weight', 'wash', 'colour', 'print', 'embroidery_applique',
+ 'topstitching', 'trims', 'styling', 'units', 'packing', 'labels', 'dc_date', 'target', 'price']
+  .forEach(col => ensureColumn('concepts', col, 'TEXT'));
+// Costs tab - target/price above were superseded by these more specific
+// fields and are no longer written to, left in place unused rather than
+// dropped (this app never drops columns on an existing table).
+['buyer_rand_target', 'buyer_rsp_target', 'factory_target_price', 'factory_price']
+  .forEach(col => ensureColumn('concepts', col, 'TEXT'));
 ensureColumn('styles', 'concept_ref', 'TEXT');
 ensureColumn('styles', 'cad_description', 'TEXT');
+// Wash Care tab - the label image itself lives in the shared photos table
+// as role='washcare' (same convention as role='cad'), this is just the
+// free-text notes alongside it (e.g. care instructions not on the label,
+// or a note about which label version is current).
+ensureColumn('styles', 'washcare_details', 'TEXT');
+// The leaf spec_categories node this style's measurement sheet was seeded
+// from - see style_spec_poms/style_spec_fits above. Picking/changing this
+// on the style (routes/styles.js's POST /:id/spec/select-category) is what
+// actually copies the bank's POMs onto the style, this column alone is
+// just which category that copy came from.
+ensureColumn('styles', 'spec_category_id', 'INTEGER');
 // Distinguishes a style's generated/uploaded CAD image from its ordinary
 // reference photos - same convention as concept_photos.role.
 ensureColumn('photos', 'role', "TEXT DEFAULT 'reference'");
+// 200px-wide copy of `path`, generated at upload time (routes/styles.js) so
+// the Style board can show every card's cover photo without pulling down a
+// full-size image per card - same convention as concept_photos.thumb_path.
+// Null for photos uploaded before this existed; attachCoverPhoto falls back
+// to the full path for those.
+ensureColumn('photos', 'thumb_path', 'TEXT');
+
+// The Style drawer's Details tab now mirrors the Concept drawer's Details
+// tab field-for-field (see public/js/drawer.js's renderBriefTab), so a
+// style keeps every field a concept already captured instead of retyping a
+// separate, thinner set - these are the fields styles didn't already have.
+// fabric_code/composition/weight replace the old single free-text `fabric`
+// column (left in place, just no longer edited); topstitching reuses the
+// existing `topstitch` column rather than adding a near-duplicate.
+['fabric_code', 'composition', 'weight', 'print', 'embroidery_applique',
+ 'packing', 'labels', 'source', 'tags', 'concept_date', 'shipping_date', 'dc_date']
+  .forEach(col => ensureColumn('styles', col, 'TEXT'));
+ensureColumn('styles', 'size_range_id', 'INTEGER');
+
+// Style drawer's Cost tab (public/js/drawer.js's renderStyleCostsTab) mirrors
+// the Concept drawer's own Costs tab field-for-field - same columns, same
+// names, so CONCEPT_TO_STYLE_FIELDS can map them straight across on
+// conversion with no renames. Replaces the old Worksheet tab's
+// cost/margin/first_ship/first_delivery/shipment_note fields (left in place
+// unused, not dropped) - % Margin itself is never stored, just recomputed
+// from buyer_rand_target/buyer_rsp_target for display.
+['cost_estimate', 'buyer_rand_target', 'buyer_rsp_target', 'factory_target_price', 'factory_price']
+  .forEach(col => ensureColumn('styles', col, 'TEXT'));
+
+// Free-text record of the cheaper alternatives a factory counter-offers
+// against a target price during costing - e.g. "can do $7.20 as briefed,
+// or $7.00 without back pockets, or $6.80 with an enzyme wash instead of
+// acid wash and no turn-up hem" - so that back-and-forth isn't lost outside
+// email/WhatsApp. Lives on both concepts and styles' Cost tabs, same field
+// name on both so CONCEPT_TO_STYLE_FIELDS maps it straight across.
+ensureColumn('concepts', 'factory_cost_options', 'TEXT');
+ensureColumn('styles', 'factory_cost_options', 'TEXT');
 
 // Shipping Schedule drawer fields beyond the core columns above - kept as a
 // non-destructive extension rather than baked into the initial CREATE TABLE
@@ -330,6 +716,15 @@ db.exec(`
 // department) and edit rights (buyers can never create/edit/delete) -
 // this only controls whether a section is visible/reachable at all.
 ensureColumn('users', 'permissions', 'TEXT');
+// A short numeric PIN (bcrypt-hashed, same as password_hash) a user can set
+// under Settings so they can identify themselves to the "Elanza CRM" MCP
+// connector over Claude Voice - voice can't complete the normal session
+// login, so an action-attributing tool call (see routes/mcp.js's
+// identify_user_by_pin and the pin param on add_comment/send_request/
+// remind_request) verifies the PIN instead, so the resulting email/comment
+// is attributed to the real person rather than a generic "Claude" sender.
+// Optional - a blank pin_hash just means that user hasn't set one yet.
+ensureColumn('users', 'pin_hash', 'TEXT');
 // One-time backfill so existing accounts keep exactly the access they had
 // before this column existed: buyers could already reach Styles and
 // Concepts (read-scoped) but were blocked from Shipping/Contacts; every
@@ -343,6 +738,98 @@ db.prepare(`
   UPDATE users SET permissions = permissions || ',fabrics'
   WHERE role != 'buyer' AND permissions NOT LIKE '%fabrics%'
 `).run();
+// Same backfill for 'factories', added after both of the above.
+db.prepare(`
+  UPDATE users SET permissions = permissions || ',factories'
+  WHERE role != 'buyer' AND permissions NOT LIKE '%factories%'
+`).run();
+
+ensureColumn('fabrics', 'weight', 'TEXT');
+// Extra fields matching Pick n Pay's own "Material Submission form" (see
+// public/PnPMaterialsubmissionV1.0 (003).pdf) - fabric-level properties
+// only (type/construction/finishes/suppliers/yarn makeup). The form's other
+// sections - Style Detail (department/season/style number/description) and
+// half of Supplier Detail (Garment Manufacturer, sign-off date) - aren't
+// fabric-level (a fabric can go into multiple styles/factories over time),
+// so those aren't stored here; they'd come from the actual style/order at
+// whatever future point this gets wired into a real "submit to buyer" flow.
+['description', 'fabric_type', 'construction', 'construction_gauge', 'finishes',
+ 'fabric_supplier', 'yarn_supplier', 'country_of_origin']
+  .forEach(col => ensureColumn('fabrics', col, 'TEXT'));
+// Yarn Detail is a fixed 4-column grid on the form itself (Yarn 1-4, never
+// more) - matching that shape directly with 4 sets of columns rather than a
+// separate one-to-many table, since it's simplest and maps straight onto
+// the form if this ever gets turned into a PDF auto-fill.
+[1, 2, 3, 4].forEach(n => {
+  ['type', 'composition', 'spinning', 'count', 'sustainability'].forEach(attr => {
+    ensureColumn('fabrics', `yarn${n}_${attr}`, 'TEXT');
+  });
+});
+// Fabrics used to also mirror the latest report's full field set
+// (report_number, approval_date, valid_until, style_no, end_buyer,
+// sample_description, overall_result, weight_gsm) - that's now tracked
+// per-report on fabric_test_reports only, so drop the mirrored columns
+// from any existing database that still has them.
+['weight_gsm', 'report_number', 'approval_date', 'valid_until', 'style_no', 'end_buyer', 'sample_description',
+ 'overall_result', 'testing_period_start', 'testing_period_end']
+  .forEach(col => dropColumnIfExists('fabrics', col));
+ensureColumn('fabric_test_reports', 'weight_oz', 'TEXT');
+// Distinguishes the base/bulk fabric test (always required) from the
+// additional print/embellishment durability test (required in addition
+// whenever a concept has Print or Embroidery/Applique details) - see
+// public/js/concepts.js's fabric-report-requirement banner.
+ensureColumn('fabric_test_reports', 'report_type', "TEXT DEFAULT 'base'");
+// Tracks whether a factory has replied on a sent request yet - see
+// routes/requests.js's PUT :id/status and the Requests nav section's
+// Awaiting/Received filter. received_at is set the moment status flips to
+// 'received' (and cleared if flipped back), so it doubles as "when did the
+// reply come back" without a separate column. request_type/message/
+// reminder_count/last_reminder_at only need ensureColumn for databases that
+// had this table before it grew past cost-only requests - the CREATE TABLE
+// above already includes them for a fresh install.
+ensureColumn('concept_requests', 'status', "TEXT DEFAULT 'awaiting'");
+ensureColumn('concept_requests', 'received_at', 'TEXT');
+ensureColumn('concept_requests', 'request_type', "TEXT DEFAULT 'cost'");
+ensureColumn('concept_requests', 'message', 'TEXT');
+ensureColumn('concept_requests', 'reminder_count', 'INTEGER DEFAULT 0');
+ensureColumn('concept_requests', 'last_reminder_at', 'TEXT');
+// A request can now be sent from a Style's own Requests tab too (a sample,
+// PP sample, bulk sample, or fabric test request against a confirmed style
+// rather than a still-in-development concept - see routes/styles.js's
+// send-request route). Every row still has exactly one of concept_id/
+// style_id set, never both - see ensureConceptRequestsConceptIdNullable
+// below for why concept_id had to stop being NOT NULL to allow this.
+ensureColumn('concept_requests', 'style_id', 'INTEGER');
+ensureColumn('concept_requests', 'style_no', 'TEXT');
+ensureColumn('concept_requests', 'style_description', 'TEXT');
+// SQLite can't drop a NOT NULL constraint in place - same table-rebuild
+// technique as ensureOrdersStyleIdNullable/ensureContactsRetailerDeptNullable
+// above, idempotent via PRAGMA table_info.
+function ensureConceptRequestsConceptIdNullable() {
+  const info = db.prepare("PRAGMA table_info(concept_requests)").all();
+  const conceptIdCol = info.find(c => c.name === 'concept_id');
+  if (!conceptIdCol || conceptIdCol.notnull === 0) return;
+  console.log('Migrating concept_requests.concept_id to nullable...');
+  const cols = info.map(c => {
+    let def = c.name + ' ' + c.type;
+    if (c.name === 'id') def += ' PRIMARY KEY AUTOINCREMENT';
+    if (c.name === 'concept_id') def += ' REFERENCES concepts(id)';
+    if (c.name === 'style_id') def += ' REFERENCES styles(id)';
+    if (c.dflt_value !== null) def += ' DEFAULT ' + c.dflt_value;
+    return def;
+  });
+  const colNames = info.map(c => c.name).join(', ');
+  db.exec('PRAGMA foreign_keys=OFF;');
+  db.transaction(() => {
+    db.exec('CREATE TABLE concept_requests_new (' + cols.join(', ') + ')');
+    db.exec('INSERT INTO concept_requests_new (' + colNames + ') SELECT ' + colNames + ' FROM concept_requests');
+    db.exec('DROP TABLE concept_requests');
+    db.exec('ALTER TABLE concept_requests_new RENAME TO concept_requests');
+  })();
+  db.exec('PRAGMA foreign_keys=ON;');
+  console.log('concept_requests.concept_id is now nullable');
+}
+ensureConceptRequestsConceptIdNullable();
 
 function seed() {
   // Backfills concept_date for any concept created before this field

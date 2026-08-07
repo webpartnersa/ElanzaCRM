@@ -1,19 +1,41 @@
 const DEPARTMENTS = ['Ladies','Mens','Younger Boys','Older Boys','Younger Girls','Older Girls','Babywear'];
 
+// Every editable concept field, defaulted blank - mirrors public/js/concepts.js's
+// blankConceptDraft() so mobile create/edit carries the exact same field set as
+// the desktop portal's Concept drawer, field for field.
+function blankFormConcept(){
+  return {
+    department: DEPARTMENTS[0], description:'', source:'', tags:'',
+    concept_date: new Date().toISOString().slice(0,7), size_range_id:'',
+    fabric_code:'', composition:'', weight:'',
+    wash:'', colour:'', print:'', embroidery_applique:'', topstitching:'', trims:'', styling:'',
+    units:'', packing:'', labels:'',
+    factory:'', shipping_date:'', dc_date:'',
+    cost_estimate:'', buyer_rand_target:'', buyer_rsp_target:'', factory_target_price:'', factory_price:'', factory_cost_options:'',
+  };
+}
+function blankFormState(isNew){
+  return {
+    isNew, id:null, concept_no:'', concept: blankFormConcept(), specCategoryId:null,
+    photos:[], pendingFiles:[], tab:'details', submitting:false, error:'', validationHint:'',
+    cadBusy:false, cadPreview:null, conversions:[],
+  };
+}
+
 const state = {
-  screen: 'loading', // loading | login | home | create | browse | detail | success
+  screen: 'loading', // loading | login | home | form | browse | detail | success | specAdmin | sizeAdmin
   user: null,
   loginBusy: false,
   loginError: '',
 
-  // create form
-  department: null,
-  description: '',
-  photos: [], // { file, previewUrl }
-  submitting: false,
-  submitError: '',
-  validationHint: '',
-  lastCreated: null, // { concept_no, department }
+  // lookup data, shared by the create/edit form and the read-only detail view
+  fabrics: [],
+  specCategories: [],
+  sizeRanges: [],
+
+  // unified create/edit concept form - see blankFormState()
+  form: null,
+  lastCreated: null, // { concept_no, department } - success screen after a create
 
   // browse
   concepts: [],
@@ -21,12 +43,15 @@ const state = {
   conceptsError: '',
   browseFilter: '',
 
-  // detail
+  // detail (read-only view before editing)
   conceptDetail: null, // { concept, photos, conversions }
   conceptDetailLoading: false,
   conceptDetailError: '',
 
   lightboxUrl: null,
+
+  // spec hierarchy admin screen
+  specAdmin: null, // { department }
 
   // install prompt
   installPromptEvent: null, // captured 'beforeinstallprompt' event, Android/Chrome only
@@ -52,6 +77,63 @@ function esc(s){
 
 function hasConceptsPermission(){
   return (state.user.permissions || '').split(',').filter(Boolean).includes('concepts');
+}
+
+// Renders a labeled row in the concept detail view; skipped entirely when
+// empty so buyer-scoped fields (cost_estimate/factory, stripped server-side)
+// don't leave blank rows.
+function detailField(label, value){
+  if (!value) return '';
+  return `<div class="detail-field-row"><span class="detail-field-label">${esc(label)}</span><span class="detail-field-value">${esc(value)}</span></div>`;
+}
+
+function formatMonth(yyyymm){
+  if (!yyyymm) return '';
+  const [y, m] = yyyymm.split('-');
+  const names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const idx = parseInt(m, 10) - 1;
+  return (names[idx] || m) + ' ' + y;
+}
+
+function photoBadge(p){
+  if (p.role === 'cad') return `<span class="photo-role-badge">CAD</span>`;
+  if (p.role === 'cad_detail' && p.label) return `<span class="photo-role-badge">${esc(p.label)}</span>`;
+  if (p.role === 'detail') return `<span class="photo-role-badge">Detail</span>`;
+  return '';
+}
+
+// Walks the spec category tree up from a leaf id to build a readable
+// "Denim > Skinny" path for the read-only detail view.
+function specPathLabel(specCategoryId){
+  if (!specCategoryId) return '';
+  const byId = {};
+  (state.specCategories||[]).forEach(n => { byId[n.id] = n; });
+  let cur = byId[specCategoryId];
+  if (!cur) return '';
+  const parts = [cur.name];
+  while (cur.parent_id) { cur = byId[cur.parent_id]; if (!cur) break; parts.unshift(cur.name); }
+  return parts.join(' > ');
+}
+function sizeRangeLabel(sizeRangeId){
+  if (!sizeRangeId) return '';
+  const r = (state.sizeRanges||[]).find(r => String(r.id) === String(sizeRangeId));
+  return r ? r.values.join(' / ') : '';
+}
+
+// ---- Toast (mobile has no other transient-feedback mechanism) ----
+let _toastTimer = null;
+function showToast(msg){
+  let el = document.getElementById('mobile-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'mobile-toast';
+    el.className = 'mobile-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 
 // ---- Screens ----
@@ -109,7 +191,7 @@ function renderHome(){
   </div>
   <div class="home-scroll">
     ${canCreate ? `
-    <button class="dash-tile" onclick="goToCreate()">
+    <button class="dash-tile" onclick="openCreateConcept()">
       <div class="dash-icon">${ICONS.camera}</div>
       <div class="dash-text">
         <span class="dash-title">New Concept</span>
@@ -121,63 +203,735 @@ function renderHome(){
       <div class="dash-icon">${ICONS.grid}</div>
       <div class="dash-text">
         <span class="dash-title">Browse Concepts</span>
-        <span class="dash-sub">View existing concepts</span>
+        <span class="dash-sub">View, edit and manage existing concepts</span>
       </div>
       <span class="dash-chevron">${ICONS.chevronRight}</span>
     </button>
   </div>`;
 }
 
-function renderCreate(){
+// ---- Unified create/edit concept form ----
+
+function renderFormScreen(){
+  const f = state.form;
+  if (!f) {
+    return `
+    <div class="topbar">
+      <button class="back-btn" onclick="history.back()">${ICONS.back}</button>
+      <div class="topbar-title"><h1>Concept</h1></div>
+      <button class="signout" onclick="logout()">Sign out</button>
+    </div>
+    <div class="form-scroll"><div class="spinner" style="margin-top:40px;"></div></div>`;
+  }
+  if (f.loadError) {
+    return `
+    <div class="topbar">
+      <button class="back-btn" onclick="history.back()">${ICONS.back}</button>
+      <div class="topbar-title"><h1>Concept</h1></div>
+      <button class="signout" onclick="logout()">Sign out</button>
+    </div>
+    <div class="form-scroll"><div class="error-msg" style="margin-top:20px;">${esc(f.loadError)}</div></div>`;
+  }
+
+  const showTabs = !f.isNew;
+  const tab = f.tab || 'details';
   return `
   <div class="topbar">
-    <button class="back-btn" onclick="goHome()">${ICONS.back}</button>
-    <div class="topbar-title"><h1>New Concept</h1></div>
+    <button class="back-btn" onclick="closeForm()">${ICONS.back}</button>
+    <div class="topbar-title"><h1>${f.isNew ? 'New Concept' : esc(f.concept_no)}</h1></div>
     <button class="signout" onclick="logout()">Sign out</button>
   </div>
-
+  ${showTabs ? `
+    <div class="form-tabs">
+      <button class="form-tab-btn ${tab==='details'?'active':''}" onclick="setFormTab('details')">Details</button>
+      <button class="form-tab-btn ${tab==='costs'?'active':''}" onclick="setFormTab('costs')">Costs</button>
+      <button class="form-tab-btn ${tab==='cad'?'active':''}" onclick="setFormTab('cad')">CAD</button>
+    </div>
+  ` : ''}
   <div class="form-scroll">
+    ${(!showTabs || tab==='details') ? renderFormPhotosSection() + renderFormDetailsSection() : ''}
+    ${(!showTabs || tab==='costs') ? renderFormCostsSection() : ''}
+    ${showTabs && tab==='cad' ? renderFormCadSection() : ''}
+    ${!f.isNew && f.conversions && f.conversions.length ? `
+      <div class="section">
+        <div class="section-label">Converted To</div>
+        <div class="chip-grid">${f.conversions.map(cv=>`<span class="chip selected" style="pointer-events:none;">${esc(cv.style_no)}</span>`).join('')}</div>
+      </div>` : ''}
+    ${!f.isNew ? `
+      <div class="section">
+        <div class="section-hint">Converting to a Style isn't available on mobile yet - open this concept on the desktop portal to convert it.</div>
+      </div>
+      <button class="btn-block ghost" style="border-color:var(--stitch-red);color:var(--stitch-red);" onclick="deleteFormConcept()">Delete Concept</button>
+    ` : ''}
+    ${f.error ? `<div class="error-msg" style="margin-top:14px;">${esc(f.error)}</div>` : ''}
+  </div>
+  <div class="bottom-bar">
+    ${f.validationHint ? `<div class="validation-hint">${esc(f.validationHint)}</div>` : ''}
+    <button class="btn-block primary" ${f.submitting ? 'disabled' : ''} onclick="submitForm()">${f.submitting ? 'Saving...' : (f.isNew ? 'Create Concept' : 'Save Changes')}</button>
+  </div>`;
+}
+
+function renderFormPhotosSection(){
+  const f = state.form;
+  if (f.isNew) {
+    return `
+      <div class="section">
+        <div class="section-label">Photos ${f.pendingFiles.length ? `(${f.pendingFiles.length})` : ''}</div>
+        <div class="photo-grid">
+          ${f.pendingFiles.map((p,i) => `
+            <div class="photo-tile">
+              <img src="${p.previewUrl}" alt="" onclick="openLightbox('${p.previewUrl}')"/>
+              <button class="photo-remove" onclick="removeFormPendingPhoto(${i})">&times;</button>
+            </div>
+          `).join('')}
+        </div>
+        <div class="add-photo-row ${f.pendingFiles.length ? 'compact' : ''}">
+          <button class="add-photo-tile ${f.pendingFiles.length ? '' : 'big'}" onclick="openCamera()">${ICONS.camera}<span>${f.pendingFiles.length ? 'Camera' : 'Take Photo'}</span></button>
+          <button class="add-photo-tile ${f.pendingFiles.length ? '' : 'big'}" onclick="openGallery()">${ICONS.gallery}<span>Upload</span></button>
+        </div>
+        ${!f.pendingFiles.length ? `<div class="section-hint">At least one photo is required.</div>` : ''}
+      </div>`;
+  }
+  const nonCad = f.photos.filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+  return `
+    <div class="section">
+      <div class="section-label">Photos ${nonCad.length ? `(${nonCad.length})` : ''}</div>
+      <div class="photo-manage-list">
+        ${nonCad.map((p,i) => `
+          <div class="photo-manage-row">
+            <img class="photo-manage-thumb" src="${p.thumb_path||p.path}" alt="" onclick="openLightbox('${p.path}')"/>
+            <div class="photo-manage-info">
+              <div class="photo-manage-label">${i===0 ? 'Main photo' : 'Photo ' + (i+1)}</div>
+              <select onchange="setFormPhotoRole(${p.id}, this.value)">
+                <option value="reference" ${p.role!=='detail'&&p.role!=='cad'?'selected':''}>Reference</option>
+                <option value="detail" ${p.role==='detail'?'selected':''}>Detail crop</option>
+                <option value="cad" ${p.role==='cad'?'selected':''}>CAD sheet</option>
+              </select>
+            </div>
+            <div class="photo-manage-actions">
+              <button class="photo-mini-btn" onclick="moveFormPhoto(${i}, -1)" ${i===0?'disabled':''}>&#8593;</button>
+              <button class="photo-mini-btn" onclick="moveFormPhoto(${i}, 1)" ${i===nonCad.length-1?'disabled':''}>&#8595;</button>
+              <button class="photo-mini-btn danger" onclick="removeFormPhoto(${p.id})">&times;</button>
+            </div>
+          </div>
+        `).join('') || `<div class="section-hint">No photos yet.</div>`}
+      </div>
+      <div class="add-photo-row compact" style="margin-top:12px;">
+        <button class="add-photo-tile" onclick="openCamera()">${ICONS.camera}<span>Camera</span></button>
+        <button class="add-photo-tile" onclick="openGallery()">${ICONS.gallery}<span>Upload</span></button>
+      </div>
+    </div>`;
+}
+
+// Plain text/textarea fields with no cross-field wiring - oninput writes
+// straight into state.form.concept on every keystroke (not just onchange),
+// so a re-render triggered by anything else (switching tabs, adding a
+// photo, picking a fabric) always rebuilds from up-to-date state instead of
+// losing whatever's mid-typed elsewhere on the form.
+function formTextareaField(key, label){
+  const v = state.form.concept[key] || '';
+  // Print/Embroidery-Applique also drive the fabric-report-requirement
+  // banner - state.form.concept is already kept live on every keystroke
+  // (see updateFormField), so the banner patch just re-reads it.
+  const extra = (key === 'print' || key === 'embroidery_applique') ? `; updateFabricReportRequirementMobile()` : '';
+  return `<div class="field"><label>${label}</label><textarea id="mf-${key}" oninput="updateFormField('${key}', this.value)${extra}">${esc(v)}</textarea></div>`;
+}
+function updateFormField(key, value){
+  if (state.form) state.form.concept[key] = value;
+}
+
+// Factory dropdown sourced from Contacts' Factory-position company names
+// (see state.factoryNames / loadLookupData) - mirrors desktop's
+// renderConceptFactorySelect in public/js/concepts.js, including keeping
+// an existing-but-unmatched value selectable rather than dropping it.
+function renderFactorySelect(current){
+  const names = state.factoryNames || [];
+  const known = names.includes(current);
+  const opts = [`<option value="">-</option>`];
+  if (current && !known) opts.push(`<option value="${esc(current)}" selected>${esc(current)} (not in Contacts)</option>`);
+  names.forEach(n => opts.push(`<option value="${esc(n)}" ${n===current?'selected':''}>${esc(n)}</option>`));
+  return `<select id="mf-factory" onchange="updateFormField('factory', this.value)">${opts.join('')}</select>`;
+}
+
+// Whenever a concept has Print or Embroidery/Applique details, an
+// additional Print/Embellishment fabric report is required on top of the
+// base/bulk fabric report - same reminder as desktop's
+// conceptNeedsPrintReport(), just a reminder, not an automated check
+// against what's actually been uploaded.
+function conceptNeedsPrintReportMobile(c){
+  return !!((c.print && c.print.trim()) || (c.embroidery_applique && c.embroidery_applique.trim()));
+}
+function renderFabricReportRequirementMobile(needsReport){
+  return needsReport
+    ? `<div class="section-hint" style="color:var(--stitch-red);font-weight:700;">An additional Print/Embellishment fabric report is required, on top of the base fabric report.</div>`
+    : `<div class="section-hint">No print or embroidery/applique details entered - the base fabric report is sufficient.</div>`;
+}
+function updateFabricReportRequirementMobile(){
+  const el = document.getElementById('mf-fabric-report-requirement');
+  if (el) el.innerHTML = renderFabricReportRequirementMobile(conceptNeedsPrintReportMobile(state.form.concept));
+}
+
+function renderFormDetailsSection(){
+  const c = state.form.concept;
+  const fabricOptions = (state.fabrics||[]).map(fab => `<option value="${esc(fab.code)}" ${c.fabric_code===fab.code?'selected':''}>${esc(fab.code)}</option>`).join('');
+  const sizeOptions = (state.sizeRanges||[]).map(r => `<option value="${r.id}" ${String(c.size_range_id||'')===String(r.id)?'selected':''}>${esc(r.values.join(' / '))}</option>`).join('');
+  return `
     <div class="section">
       <div class="section-label">Department</div>
-      <div class="chip-grid">
-        ${DEPARTMENTS.map(d => `<button class="chip ${state.department===d?'selected':''}" onclick="selectDepartment('${d}')">${d}</button>`).join('')}
+      <div class="field">
+        <select id="mf-department" onchange="onFormDeptChange(this.value)">
+          ${DEPARTMENTS.map(d => `<option value="${d}" ${c.department===d?'selected':''}>${d}</option>`).join('')}
+        </select>
       </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Fabric</div>
+      <div class="field">
+        <select id="mf-fabric_code" onchange="onFormFabricPicked(this.value)">
+          <option value="">-</option>
+          ${fabricOptions}
+        </select>
+      </div>
+      <div class="field" style="margin-top:10px;"><label>Composition</label><input id="mf-composition" value="${esc(c.composition)}" oninput="updateFormField('composition', this.value)"/></div>
+      <div class="field" style="margin-top:10px;"><label>Weight (oz)</label><input id="mf-weight" value="${esc(c.weight)}" oninput="updateFormField('weight', this.value)"/></div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Construction</div>
+      ${formTextareaField('wash','Wash')}
+      ${formTextareaField('colour','Colour')}
+      ${formTextareaField('print','Print')}
+      ${formTextareaField('embroidery_applique','Embroidery / Applique')}
+      <div id="mf-fabric-report-requirement">${renderFabricReportRequirementMobile(conceptNeedsPrintReportMobile(c))}</div>
+      ${formTextareaField('topstitching','Topstitching')}
+      ${formTextareaField('trims','Trims')}
+      ${formTextareaField('styling','Styling')}
+    </div>
+
+    <div class="section">
+      <div class="section-label">Spec</div>
+      ${renderFormSpecSelector(c.department, state.form.specCategoryId)}
+    </div>
+
+    <div class="section">
+      <div class="field"><label>Units</label><input id="mf-units" value="${esc(c.units)}" oninput="updateFormField('units', this.value)"/></div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Sizes</div>
+      <div class="field">
+        <select id="mf-size_range_id" onchange="updateFormField('size_range_id', this.value)">
+          <option value="">-</option>
+          ${sizeOptions}
+        </select>
+      </div>
+      <button class="btn-link" style="margin-top:8px;" onclick="openSpecOrSizeAdminFromForm('size')">Manage size ranges</button>
+    </div>
+
+    <div class="section">
+      ${formTextareaField('packing','Packing')}
+      ${formTextareaField('labels','Labels')}
     </div>
 
     <div class="section">
       <div class="section-label">Description <span style="font-weight:400;text-transform:none;">(optional)</span></div>
-      <textarea class="desc-input" placeholder="e.g. Embroidered denim shorts" oninput="updateDescription(this.value)">${esc(state.description)}</textarea>
+      <textarea class="desc-input" oninput="updateFormField('description', this.value)">${esc(c.description)}</textarea>
     </div>
 
     <div class="section">
-      <div class="section-label">Photos ${state.photos.length ? `(${state.photos.length})` : ''}</div>
-      <div class="photo-grid">
-        ${state.photos.map((p,i) => `
-          <div class="photo-tile">
-            <img src="${p.previewUrl}" alt="" onclick="openLightbox('${p.previewUrl}')"/>
-            <button class="photo-remove" onclick="removePhoto(${i})">&times;</button>
-          </div>
-        `).join('')}
+      <div class="section-label">Source</div>
+      <div class="field">
+        <select id="mf-source" onchange="updateFormField('source', this.value)">
+          <option value="" ${!c.source?'selected':''}>-</option>
+          <option value="Buyer photo" ${c.source==='Buyer photo'?'selected':''}>Buyer photo</option>
+          <option value="In-house sample" ${c.source==='In-house sample'?'selected':''}>In-house sample</option>
+          <option value="Bought-in reference" ${c.source==='Bought-in reference'?'selected':''}>Bought-in reference</option>
+        </select>
       </div>
-      ${state.photos.length === 0
-        ? `<div class="add-photo-row">
-            <button class="add-photo-tile big" onclick="openCamera()">${ICONS.camera}<span>Take Photo</span></button>
-            <button class="add-photo-tile big" onclick="openGallery()">${ICONS.gallery}<span>Upload</span></button>
-          </div>`
-        : `<div class="add-photo-row compact">
-            <button class="add-photo-tile" onclick="openCamera()">${ICONS.camera}<span>Camera</span></button>
-            <button class="add-photo-tile" onclick="openGallery()">${ICONS.gallery}<span>Upload</span></button>
-          </div>`
-      }
-      ${state.photos.length === 0 ? `<div class="section-hint">At least one photo is required.</div>` : ''}
-      ${state.submitError ? `<div class="photo-warning">${esc(state.submitError)}</div>` : ''}
     </div>
-  </div>
 
-  <div class="bottom-bar">
-    ${state.validationHint ? `<div class="validation-hint">${esc(state.validationHint)}</div>` : ''}
-    <button class="btn-block primary" ${state.submitting ? 'disabled' : ''} onclick="submitConcept()">${state.submitting ? 'Creating...' : 'Create Concept'}</button>
-  </div>`;
+    <div class="section">
+      <div class="field"><label>Tags (comma separated)</label><input id="mf-tags" value="${esc(c.tags)}" oninput="updateFormField('tags', this.value)"/></div>
+    </div>
+
+    <div class="section">
+      <div class="field"><label>Concept date</label><input type="month" id="mf-concept_date" value="${esc(c.concept_date)}" oninput="updateFormField('concept_date', this.value)"/></div>
+    </div>
+
+    <div class="section">
+      <div class="field"><label>Factory</label>${renderFactorySelect(c.factory)}</div>
+    </div>
+
+    <div class="section">
+      <div class="field"><label>DC Date</label><input type="date" id="mf-dc_date" value="${esc(c.dc_date)}" oninput="updateConceptDcDate(this.value)"/></div>
+      <div class="field" style="margin-top:10px;"><label>Shipping Date</label><input type="date" id="mf-shipping_date" value="${esc(c.shipping_date)}" oninput="updateFormField('shipping_date', this.value)"/></div>
+      <div class="section-hint">Shipping Date is set automatically to 55 days before DC Date - editable afterward if it needs adjusting.</div>
+    </div>
+  `;
+}
+// DC Date is the one actually set by hand - Shipping Date defaults to 55
+// days before it, same live-default-stays-editable pattern as desktop's
+// updateConceptShippingDateFromDc.
+function updateConceptDcDate(value){
+  updateFormField('dc_date', value);
+  if (!value) return;
+  const d = new Date(value + 'T00:00:00');
+  d.setDate(d.getDate() - 55);
+  const shipping = d.toISOString().slice(0, 10);
+  updateFormField('shipping_date', shipping);
+  const el = document.getElementById('mf-shipping_date');
+  if (el) el.value = shipping;
+}
+
+function onFormDeptChange(d){
+  state.form.concept.department = d;
+  state.form.specCategoryId = null; // a different department is a different spec tree
+  render();
+}
+
+// Live lookup against the already-loaded fabrics list, same pattern as
+// desktop's onConceptFabricPicked() - unconditionally overwrites
+// composition/weight on pick, both stay freely editable afterward.
+function onFormFabricPicked(code){
+  const c = state.form.concept;
+  c.fabric_code = code;
+  const fab = (state.fabrics||[]).find(f => f.code === code);
+  if (fab) {
+    c.composition = fab.composition || '';
+    c.weight = fab.weight || '';
+  }
+  render();
+}
+
+// Cascading Spec picker - one <select> per tree level, populated with the
+// children of whatever was picked one level up, stopping at a leaf. Mirrors
+// public/js/specCategories.js's renderSpecSelector()/onSpecLevelChange()
+// exactly, just reading/writing state.form instead of state.conceptDrawer.
+function renderFormSpecSelector(department, selectedId){
+  const nodes = (state.specCategories||[]).filter(n => n.department === department);
+  if (!nodes.length) {
+    return `<div class="section-hint">No spec categories yet for ${esc(department)}.</div>
+      <button class="btn-link" style="margin-top:8px;" onclick="openSpecOrSizeAdminFromForm('spec')">Manage spec hierarchy</button>`;
+  }
+  const byId = {};
+  nodes.forEach(n => { byId[n.id] = n; });
+  let chain = [];
+  if (selectedId && byId[selectedId]) {
+    let cur = byId[selectedId];
+    chain.unshift(cur.id);
+    while (cur.parent_id) { cur = byId[cur.parent_id]; if (!cur) break; chain.unshift(cur.id); }
+  }
+  const selects = [];
+  let parentId = null;
+  let level = 0;
+  while (true) {
+    const options = nodes.filter(n => n.parent_id === parentId).sort((a,b) => (a.sort_order-b.sort_order) || a.name.localeCompare(b.name));
+    if (!options.length) break;
+    const chosen = chain[level] || '';
+    selects.push(`
+      <div class="field" style="margin-top:${level ? 10 : 0}px;">
+        <select onchange="onFormSpecLevelChange(${level}, this.value)">
+          <option value="">Select...</option>
+          ${options.map(o => `<option value="${o.id}" ${String(chosen)===String(o.id)?'selected':''}>${esc(o.name)}</option>`).join('')}
+        </select>
+      </div>
+    `);
+    if (!chosen) break;
+    parentId = Number(chosen);
+    level++;
+  }
+  return selects.join('') + `<button class="btn-link" style="margin-top:8px;" onclick="openSpecOrSizeAdminFromForm('spec')">Manage spec hierarchy</button>`;
+}
+function onFormSpecLevelChange(level, value){
+  const nodes = state.specCategories || [];
+  const byId = {};
+  nodes.forEach(n => { byId[n.id] = n; });
+  let chain = [];
+  if (state.form.specCategoryId && byId[state.form.specCategoryId]) {
+    let cur = byId[state.form.specCategoryId];
+    chain.unshift(cur.id);
+    while (cur.parent_id) { cur = byId[cur.parent_id]; if (!cur) break; chain.unshift(cur.id); }
+  }
+  chain = chain.slice(0, level);
+  if (value) chain.push(Number(value));
+  state.form.specCategoryId = chain.length ? chain[chain.length-1] : null;
+  render();
+}
+
+// Margin the buyer makes = (RSP - what they pay us) / RSP. Buyer Rand Target
+// is entered ex VAT, but RSP is VAT-inclusive (what the shopper pays), so
+// VAT (15%) is added to the rand figure before comparing the two - same
+// calc as desktop's computeConceptMargin(). Purely derived, never stored on
+// its own - just recomputed for display, live as either field changes.
+// Patches only the display span so typing here never risks losing anything
+// typed elsewhere on the form.
+const VAT_RATE = 0.15;
+function computeFormMargin(rand, rsp){
+  const r = parseFloat(rand), s = parseFloat(rsp);
+  if (!r || !s || isNaN(r) || isNaN(s)) return null;
+  const randInclVat = r * (1 + VAT_RATE);
+  return ((s - randInclVat) / s) * 100;
+}
+function formatFormMargin(rand, rsp){
+  const m = computeFormMargin(rand, rsp);
+  return m === null ? '—' : m.toFixed(1) + '%';
+}
+function updateFormMargin(){
+  updateFormField('buyer_rand_target', document.getElementById('mf-buyer_rand_target').value);
+  updateFormField('buyer_rsp_target', document.getElementById('mf-buyer_rsp_target').value);
+  const el = document.getElementById('mf-margin-display');
+  if (el) el.textContent = formatFormMargin(state.form.concept.buyer_rand_target, state.form.concept.buyer_rsp_target);
+}
+
+function renderFormCostsSection(){
+  const c = state.form.concept;
+  return `
+    <div class="section">
+      <div class="field"><label>Cost estimate (R)</label><input id="mf-cost_estimate" value="${esc(c.cost_estimate)}" oninput="updateFormField('cost_estimate', this.value)"/></div>
+    </div>
+    <div class="section">
+      <div class="field"><label>Buyer Rand Target</label><input id="mf-buyer_rand_target" value="${esc(c.buyer_rand_target)}" oninput="updateFormMargin()"/></div>
+      <div class="field" style="margin-top:10px;"><label>Buyer RSP Target</label><input id="mf-buyer_rsp_target" value="${esc(c.buyer_rsp_target)}" oninput="updateFormMargin()"/></div>
+    </div>
+    <div class="section">
+      <div class="section-label">% Margin</div>
+      <div id="mf-margin-display" style="font-family:'Oswald',sans-serif;font-size:26px;font-weight:700;color:var(--denim-deep);">${formatFormMargin(c.buyer_rand_target, c.buyer_rsp_target)}</div>
+      <div class="section-hint">The % margin the buyer makes, from Buyer Rand Target (ex VAT, 15% added for this calc) vs Buyer RSP Target - recalculates as you type, nothing saved separately.</div>
+    </div>
+    <div class="section">
+      <div class="field"><label>Factory Target $ Price</label><input id="mf-factory_target_price" value="${esc(c.factory_target_price)}" oninput="updateFormField('factory_target_price', this.value)"/></div>
+      <div class="field" style="margin-top:10px;"><label>Factory $ Price</label><input id="mf-factory_price" value="${esc(c.factory_price)}" oninput="updateFormField('factory_price', this.value)"/></div>
+    </div>
+    <div class="section">
+      ${formTextareaField('factory_cost_options', 'Factory Cost Options')}
+      <div class="section-hint">Cheaper alternatives the factory offered against the target price, e.g. "$7.00 without back pockets" or "$6.80 with an enzyme wash instead of acid wash and no turn-up hem".</div>
+    </div>
+  `;
+}
+
+function renderFormCadSection(){
+  const f = state.form;
+  const cadPhoto = f.photos.find(p => p.role === 'cad');
+  return `
+    <div class="section">
+      <div class="section-label">Main CAD Image</div>
+      ${cadPhoto ? `
+        <div class="cad-preview-box" onclick="openLightbox('${cadPhoto.path}')">
+          <img src="${cadPhoto.path}" alt=""/>
+        </div>
+        <button class="btn-link" style="margin-top:8px;color:var(--stitch-red);" onclick="deleteFormCadPhoto(${cadPhoto.id})">Delete CAD image</button>
+      ` : `<div class="cad-placeholder">No CAD image yet</div>`}
+      <div class="add-photo-row compact" style="margin-top:12px;">
+        <button class="add-photo-tile" ${f.cadBusy ? 'disabled' : ''} onclick="generateOrRegenerateFormCad()">${ICONS.camera}<span>${f.cadBusy ? 'Working...' : (cadPhoto ? 'Regenerate AI' : 'Generate AI')}</span></button>
+        <button class="add-photo-tile" onclick="document.getElementById('cadFileInput').click()">${ICONS.gallery}<span>Upload</span></button>
+      </div>
+      <div class="section-hint">AI generation uses the first two reference photos from Details as front/back. This can take up to a minute.</div>
+    </div>
+    ${cadPhoto ? `
+      <div class="section">
+        <button class="btn-block ghost" onclick="previewFormCadSheet()">Preview CAD sheet</button>
+        <button class="btn-block primary" style="margin-top:10px;" onclick="downloadFormCadFile()">Download CAD file</button>
+        ${f.cadPreview ? `<img src="${f.cadPreview.dataUrl}" alt="" style="width:100%;border-radius:8px;margin-top:12px;border:1px solid var(--line);"/>` : ''}
+      </div>
+    ` : ''}
+  `;
+}
+
+function setFormTab(tab){
+  state.form.tab = tab;
+  render();
+}
+function closeForm(){
+  history.back();
+}
+
+// From a "Manage spec hierarchy"/"Manage size ranges" link inside the form -
+// opens the relevant admin screen without discarding the in-progress form
+// (the browser back button returns straight to it, form state untouched
+// since state.form is never cleared by opening the admin screen).
+function openSpecOrSizeAdminFromForm(which){
+  if (which === 'spec') openSpecAdmin(state.form.concept.department);
+  else openSizeAdmin();
+}
+
+// ---- Photo management (create: staged pendingFiles; edit: real photos) ----
+
+function removeFormPendingPhoto(i){
+  const p = state.form.pendingFiles[i];
+  if (p) URL.revokeObjectURL(p.previewUrl);
+  state.form.pendingFiles.splice(i, 1);
+  render();
+}
+
+async function uploadFormPhotos(files){
+  if (!files.length) return;
+  const form = new FormData();
+  files.forEach(f => form.append('photos', f));
+  try {
+    const res = await fetch(`/api/concepts/${state.form.id}/photos`, { method:'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    state.form.photos = data.photos;
+    render();
+  } catch(e) { showToast(e.message); }
+}
+
+async function removeFormPhoto(photoId){
+  if (!confirm('Remove this photo?')) return;
+  try {
+    const res = await fetch(`/api/concepts/${state.form.id}/photos/${photoId}`, { method:'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not remove photo');
+    state.form.photos = data.photos;
+    render();
+  } catch(e) { showToast(e.message); }
+}
+
+// Tap-based reorder (up/down) rather than drag, since drag-and-drop is
+// unreliable on touch. Only reorders the reference/detail photos shown
+// here - cad/cad_detail ones (managed on the CAD tab) keep their own
+// sort_order untouched.
+async function moveFormPhoto(index, delta){
+  const f = state.form;
+  const nonCad = f.photos.filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+  const other = f.photos.filter(p => p.role === 'cad' || p.role === 'cad_detail');
+  const toIdx = index + delta;
+  if (toIdx < 0 || toIdx >= nonCad.length) return;
+  const reordered = [...nonCad];
+  const [moved] = reordered.splice(index, 1);
+  reordered.splice(toIdx, 0, moved);
+  f.photos = [...reordered, ...other];
+  render();
+  try {
+    const res = await fetch(`/api/concepts/${f.id}/photos/reorder`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: reordered.map(p => p.id) })
+    });
+    const data = await res.json();
+    if (res.ok) { f.photos = data.photos; render(); }
+  } catch(e) { showToast('Could not save new photo order'); }
+}
+
+async function setFormPhotoRole(photoId, role){
+  try {
+    const res = await fetch(`/api/concepts/${state.form.id}/photos/${photoId}/role`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not update role');
+    state.form.photos = data.photos;
+    render();
+  } catch(e) { showToast(e.message); }
+}
+
+// ---- CAD tab: view/generate/upload/preview/download ----
+// Canvas-composited sheet logic below is a direct port of desktop's
+// buildCadSheetDataUrl() (public/js/concepts.js) - same layout, same fonts,
+// same backend endpoint - so a downloaded PDF looks identical either way.
+
+function loadImageEl(src){
+  return new Promise((resolve,reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = src; });
+}
+function drawContain(ctx, img, x, y, w, h){
+  const scale = Math.min(w/img.width, h/img.height);
+  const dw = img.width*scale, dh = img.height*scale;
+  ctx.drawImage(img, x+(w-dw)/2, y+(h-dh)/2, dw, dh);
+}
+function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight){
+  let curY = y;
+  (text || '').split('\n').forEach(paragraph => {
+    if (!paragraph.trim()) { curY += lineHeight; return; }
+    const words = paragraph.split(/\s+/);
+    let line = '';
+    words.forEach(word => {
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width > maxWidth && line) {
+        ctx.fillText(line, x, curY); line = word; curY += lineHeight;
+      } else { line = test; }
+    });
+    if (line) { ctx.fillText(line, x, curY); curY += lineHeight; }
+  });
+  return curY;
+}
+async function buildFormCadSheetDataUrl(){
+  const f = state.form;
+  const cadPhoto = f.photos.find(p => p.role === 'cad');
+  if (!cadPhoto) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 1900; canvas.height = 1000;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const imgAreaWidth = 1500;
+  const cadImg = await loadImageEl(cadPhoto.path);
+  drawContain(ctx, cadImg, 0, 0, imgAreaWidth, canvas.height);
+
+  const sbX = imgAreaWidth + 60;
+  const textMaxWidth = canvas.width - sbX - 60;
+  const logoW = 200, logoH = logoW * (640 / 594);
+
+  try {
+    const logo = await loadImageEl('/img/E-Logo-concept.PNG');
+    ctx.drawImage(logo, sbX, 70, logoW, logoH);
+  } catch(e) { /* logo optional */ }
+
+  ctx.fillStyle = '#1c2833';
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 46px Oswald, sans-serif';
+  ctx.fillText(f.concept_no, sbX, 70 + logoH + 70);
+  ctx.font = '24px "IBM Plex Sans", sans-serif';
+  wrapCanvasText(ctx, f.concept.description || '', sbX, 70 + logoH + 112, textMaxWidth, 32);
+
+  return { dataUrl: canvas.toDataURL('image/png') };
+}
+async function previewFormCadSheet(){
+  try {
+    const built = await buildFormCadSheetDataUrl();
+    if (!built) { showToast('Generate or upload a main CAD image first'); return; }
+    state.form.cadPreview = built;
+    render();
+  } catch(e) { showToast('Could not build preview: ' + e.message); }
+}
+async function downloadFormCadFile(){
+  try {
+    const built = state.form.cadPreview || await buildFormCadSheetDataUrl();
+    if (!built) { showToast('Generate or upload a main CAD image first'); return; }
+    showToast('Building PDF...');
+    const res = await fetch(`/api/concepts/${state.form.id}/export-cad-pdf`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: built.dataUrl })
+    });
+    if (!res.ok) { const d = await res.json().catch(()=>({})); throw new Error(d.error || 'Export failed'); }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${state.form.concept_no}.pdf`; a.click();
+    URL.revokeObjectURL(url);
+    showToast('PDF downloaded');
+  } catch(e) { showToast('Could not download CAD file: ' + e.message); }
+}
+async function generateOrRegenerateFormCad(){
+  const f = state.form;
+  const sourcePhotos = f.photos.filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+  if (sourcePhotos.length < 2) { showToast('Add at least two reference photos first'); return; }
+  f.cadBusy = true;
+  render();
+  try {
+    const res = await fetch(`/api/concepts/${f.id}/generate-cad-ai`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photoIds: [sourcePhotos[0].id, sourcePhotos[1].id] })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'CAD generation failed');
+    f.photos = data.photos;
+    f.cadBusy = false;
+    f.cadPreview = null;
+    render();
+    showToast('CAD generated');
+  } catch(e) {
+    f.cadBusy = false;
+    render();
+    showToast(e.message);
+  }
+}
+async function uploadFormCadMain(file){
+  const formData = new FormData();
+  formData.append('photo', file);
+  try {
+    const res = await fetch(`/api/concepts/${state.form.id}/cad-main`, { method:'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    state.form.photos = data.photos;
+    state.form.cadPreview = null;
+    render();
+    showToast('CAD image uploaded');
+  } catch(e) { showToast(e.message); }
+}
+async function deleteFormCadPhoto(photoId){
+  if (!confirm('Delete the generated CAD image? You can always generate a new one.')) return;
+  try {
+    const res = await fetch(`/api/concepts/${state.form.id}/photos/${photoId}`, { method:'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not delete');
+    state.form.photos = data.photos;
+    state.form.cadPreview = null;
+    render();
+  } catch(e) { showToast(e.message); }
+}
+
+// ---- Save / delete ----
+
+async function submitForm(){
+  const f = state.form;
+  if (!f || f.submitting) return;
+  if (!f.concept.department) { f.validationHint = 'Please select a department'; return render(); }
+  if (f.isNew && !f.pendingFiles.length) { f.validationHint = 'Please take at least one photo'; return render(); }
+
+  f.submitting = true;
+  f.validationHint = '';
+  f.error = '';
+  render();
+
+  if (f.isNew) {
+    try {
+      const formData = new FormData();
+      Object.keys(f.concept).forEach(k => formData.append(k, f.concept[k] || ''));
+      formData.append('spec_category_id', f.specCategoryId || '');
+      f.pendingFiles.forEach(p => formData.append('photos', p.file, p.file.name || 'photo.jpg'));
+
+      const res = await fetch('/api/concepts', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not create the concept');
+
+      f.pendingFiles.forEach(p => URL.revokeObjectURL(p.previewUrl));
+      state.lastCreated = { concept_no: data.concept.concept_no, department: data.concept.department };
+      state.concepts = []; // browse cache is now stale
+      state.form = null;
+      pushScreen('success');
+      state.screen = 'success';
+      render();
+    } catch(e) {
+      f.submitting = false;
+      f.error = e.message || 'Could not reach the server';
+      render();
+    }
+  } else {
+    try {
+      const body = { ...f.concept, spec_category_id: f.specCategoryId };
+      const res = await fetch('/api/concepts/' + f.id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not save changes');
+      f.submitting = false;
+      state.concepts = []; // browse cache is now stale
+      state.conceptDetail = null; // detail cache for this id is now stale
+      showToast('Saved');
+      history.back();
+    } catch(e) {
+      f.submitting = false;
+      f.error = e.message || 'Could not reach the server';
+      render();
+    }
+  }
+}
+
+async function deleteFormConcept(){
+  const f = state.form;
+  if (!confirm(`Permanently delete ${f.concept_no}? This removes its photos too, and can't be undone.`)) return;
+  try {
+    const res = await fetch('/api/concepts/' + f.id, { method: 'DELETE' });
+    if (!res.ok) { const d = await res.json().catch(()=>({})); throw new Error(d.error || 'Could not delete'); }
+    state.concepts = state.concepts.filter(c => c.id !== f.id);
+    const conceptNo = f.concept_no;
+    state.form = null;
+    replaceScreen('browse');
+    state.screen = 'browse';
+    render();
+    loadConcepts();
+    showToast(`${conceptNo} deleted`);
+  } catch(e) { showToast(e.message); }
 }
 
 function renderBrowse(){
@@ -190,9 +944,15 @@ function renderBrowse(){
   </div>
 
   <div class="form-scroll">
-    <div class="chip-grid">
-      <button class="chip ${!state.browseFilter ? 'selected' : ''}" onclick="selectBrowseFilter('')">All</button>
-      ${DEPARTMENTS.map(d => `<button class="chip ${state.browseFilter===d?'selected':''}" onclick="selectBrowseFilter('${d}')">${d}</button>`).join('')}
+    <div class="row-actions-mobile">
+      <button class="btn-link" onclick="openSpecAdmin()">Manage Spec Hierarchy</button>
+      <button class="btn-link" onclick="openSizeAdmin()">Manage Size Ranges</button>
+    </div>
+    <div class="field">
+      <select onchange="selectBrowseFilter(this.value)">
+        <option value="" ${!state.browseFilter ? 'selected' : ''}>All departments</option>
+        ${DEPARTMENTS.map(d => `<option value="${d}" ${state.browseFilter===d?'selected':''}>${d}</option>`).join('')}
+      </select>
     </div>
 
     ${state.conceptsLoading ? `<div class="spinner" style="margin-top:40px;"></div>` : ''}
@@ -201,7 +961,7 @@ function renderBrowse(){
 
     <div class="concept-list">
       ${filtered.map(c => `
-        <button class="concept-card" onclick="openConceptDetail(${c.id})">
+        <button class="concept-card" onclick="openConceptFromBrowse(${c.id})">
           <div class="concept-thumb">${c.cover_photo ? `<img src="${c.cover_photo}" alt=""/>` : `<div class="concept-thumb-empty">${ICONS.gallery}</div>`}</div>
           <div class="concept-info">
             <div class="concept-no-label">${esc(c.concept_no)}</div>
@@ -216,6 +976,7 @@ function renderBrowse(){
 
 function renderDetail(){
   const d = state.conceptDetail;
+  const canEdit = state.user.role !== 'buyer';
   return `
   <div class="topbar">
     <button class="back-btn" onclick="closeDetail()">${ICONS.back}</button>
@@ -231,15 +992,42 @@ function renderDetail(){
         <span class="chip selected" style="pointer-events:none;">${esc(d.concept.department)}</span>
       </div>
       ${d.concept.description ? `<p class="detail-desc">${esc(d.concept.description)}</p>` : ''}
+
+      <div class="detail-fields">
+        ${detailField('Fabric', d.concept.fabric_code)}
+        ${detailField('Composition', d.concept.composition)}
+        ${detailField('Weight', d.concept.weight ? d.concept.weight + ' oz' : null)}
+        ${detailField('Spec', specPathLabel(d.concept.spec_category_id))}
+        ${detailField('Sizes', sizeRangeLabel(d.concept.size_range_id))}
+        ${detailField('Units', d.concept.units)}
+        ${detailField('Source', d.concept.source)}
+        ${detailField('Tags', d.concept.tags)}
+        ${detailField('Concept Date', formatMonth(d.concept.concept_date))}
+        ${detailField('Cost Estimate', d.concept.cost_estimate ? 'R' + d.concept.cost_estimate : null)}
+        ${detailField('Factory', d.concept.factory)}
+        ${detailField('DC Date', d.concept.dc_date)}
+        ${detailField('Shipping Date', d.concept.shipping_date)}
+      </div>
+
+      ${d.conversions && d.conversions.length ? `
+        <div class="section-label" style="margin-top:20px;">Converted To</div>
+        <div class="chip-grid">
+          ${d.conversions.map(c => `<span class="chip selected" style="pointer-events:none;">${esc(c.style_no)}</span>`).join('')}
+        </div>
+      ` : ''}
+
       <div class="section-label" style="margin-top:22px;">Photos ${d.photos.length ? `(${d.photos.length})` : ''}</div>
       <div class="photo-grid">
         ${d.photos.map(p => `
           <button class="photo-tile view-only" onclick="openLightbox('${p.path}')">
             <img src="${p.thumb_path || p.path}" alt=""/>
+            ${photoBadge(p)}
           </button>
         `).join('')}
       </div>
       ${!d.photos.length ? `<div class="section-hint">No photos on this concept.</div>` : ''}
+
+      ${canEdit ? `<button class="btn-block primary" style="margin-top:24px;" onclick="openEditConcept(${d.concept.id})">Edit Concept</button>` : ''}
     ` : ''}
   </div>`;
 }
@@ -267,6 +1055,157 @@ function renderLightbox(){
     <img src="${state.lightboxUrl}" onclick="event.stopPropagation()"/>
   </div>`;
 }
+
+// ---- Spec Hierarchy admin screen ----
+// Mirrors public/js/specCategories.js's manager drawer, as its own screen.
+
+function renderSpecAdmin(){
+  const a = state.specAdmin || { department: DEPARTMENTS[0] };
+  const nodes = (state.specCategories||[]).filter(n => n.department === a.department);
+  return `
+  <div class="topbar">
+    <button class="back-btn" onclick="closeSpecAdmin()">${ICONS.back}</button>
+    <div class="topbar-title"><h1>Spec Hierarchy</h1></div>
+    <button class="signout" onclick="logout()">Sign out</button>
+  </div>
+  <div class="form-scroll">
+    <div class="chip-grid">
+      ${DEPARTMENTS.map(d => `<button class="chip ${a.department===d?'selected':''}" onclick="setSpecAdminDept('${d}')">${d}</button>`).join('')}
+    </div>
+    <div class="section" style="margin-top:18px;">
+      ${nodes.length ? renderSpecAdminTree(nodes, null, 0) : `<div class="section-hint">No spec categories yet for ${esc(a.department)}.</div>`}
+      <button class="btn-block ghost" style="margin-top:14px;" onclick="addSpecRootMobile('${esc(a.department)}')">+ Add top-level category</button>
+    </div>
+  </div>`;
+}
+function renderSpecAdminTree(nodes, parentId, depth){
+  const children = nodes.filter(n => n.parent_id === parentId).sort((a,b) => (a.sort_order-b.sort_order) || a.name.localeCompare(b.name));
+  if (!children.length) return '';
+  return `<div style="margin-left:${depth ? 16 : 0}px;">
+    ${children.map(n => `
+      <div class="spec-admin-row">
+        <span class="spec-admin-name">${esc(n.name)}</span>
+        <div class="spec-admin-actions">
+          <button class="photo-mini-btn" onclick="addSpecChildMobile(${n.id})">+</button>
+          <button class="photo-mini-btn" onclick="renameSpecMobile(${n.id})">&#9998;</button>
+          <button class="photo-mini-btn danger" onclick="deleteSpecMobile(${n.id})">&times;</button>
+        </div>
+      </div>
+      ${renderSpecAdminTree(nodes, n.id, depth+1)}
+    `).join('')}
+  </div>`;
+}
+function setSpecAdminDept(d){ state.specAdmin.department = d; render(); }
+async function addSpecRootMobile(department){
+  const name = prompt(`New top-level category under ${department}:`);
+  if (!name || !name.trim()) return;
+  try {
+    const res = await fetch('/api/spec-categories', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ department, name: name.trim() }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not add category');
+    state.specCategories.push(data.category);
+    render();
+  } catch(e) { showToast(e.message); }
+}
+async function addSpecChildMobile(parentId){
+  const name = prompt('New sub-category name:');
+  if (!name || !name.trim()) return;
+  try {
+    const res = await fetch('/api/spec-categories', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ parent_id: parentId, name: name.trim() }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not add category');
+    state.specCategories.push(data.category);
+    render();
+  } catch(e) { showToast(e.message); }
+}
+async function renameSpecMobile(id){
+  const node = (state.specCategories||[]).find(n => n.id === id);
+  if (!node) return;
+  const name = prompt('Rename category:', node.name);
+  if (!name || !name.trim() || name.trim() === node.name) return;
+  try {
+    const res = await fetch('/api/spec-categories/'+id, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: name.trim() }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not rename');
+    const idx = state.specCategories.findIndex(n => n.id === id);
+    if (idx !== -1) state.specCategories[idx] = data.category;
+    render();
+  } catch(e) { showToast(e.message); }
+}
+async function deleteSpecMobile(id){
+  const node = (state.specCategories||[]).find(n => n.id === id);
+  if (!node) return;
+  if (!confirm(`Delete "${node.name}" and everything under it? This can't be undone, and any concept using it will have its spec cleared.`)) return;
+  try {
+    const res = await fetch('/api/spec-categories/'+id, { method:'DELETE' });
+    if (!res.ok) { const d = await res.json().catch(()=>({})); throw new Error(d.error || 'Could not delete'); }
+    const res2 = await fetch('/api/spec-categories');
+    if (res2.ok) state.specCategories = (await res2.json()).categories;
+    render();
+  } catch(e) { showToast(e.message); }
+}
+function openSpecAdmin(department){
+  state.specAdmin = { department: department || DEPARTMENTS[0] };
+  pushScreen('spec-admin');
+  state.screen = 'specAdmin';
+  render();
+}
+function closeSpecAdmin(){ history.back(); }
+
+// ---- Size Range admin screen ----
+
+function renderSizeAdmin(){
+  const ranges = state.sizeRanges || [];
+  return `
+  <div class="topbar">
+    <button class="back-btn" onclick="closeSizeAdmin()">${ICONS.back}</button>
+    <div class="topbar-title"><h1>Size Ranges</h1></div>
+    <button class="signout" onclick="logout()">Sign out</button>
+  </div>
+  <div class="form-scroll">
+    ${ranges.length ? `
+      <div class="detail-fields">
+        ${ranges.map(r => `
+          <div class="detail-field-row">
+            <span class="detail-field-value" style="text-align:left;">${esc(r.values.join(' / '))}</span>
+            <button class="photo-mini-btn danger" onclick="deleteSizeRangeMobile(${r.id})">&times;</button>
+          </div>
+        `).join('')}
+      </div>
+    ` : `<div class="section-hint">No size ranges yet.</div>`}
+    <div class="section" style="margin-top:18px;">
+      <div class="field"><label>New size range (comma separated, in order)</label><input id="new-size-range-mobile" placeholder="e.g. S, M, L, XL"/></div>
+      <button class="btn-block primary" style="margin-top:10px;" onclick="addSizeRangeMobile()">+ Add size range</button>
+    </div>
+  </div>`;
+}
+async function addSizeRangeMobile(){
+  const el = document.getElementById('new-size-range-mobile');
+  const values = el.value.split(',').map(v => v.trim()).filter(Boolean);
+  if (!values.length) { showToast('Enter at least one size value'); return; }
+  try {
+    const res = await fetch('/api/size-ranges', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ values }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not add range');
+    state.sizeRanges.push(data.range);
+    render();
+  } catch(e) { showToast(e.message); }
+}
+async function deleteSizeRangeMobile(id){
+  if (!confirm('Delete this size range? Any concept using it will have its sizes cleared.')) return;
+  try {
+    const res = await fetch('/api/size-ranges/'+id, { method:'DELETE' });
+    if (!res.ok) { const d = await res.json().catch(()=>({})); throw new Error(d.error || 'Could not delete'); }
+    state.sizeRanges = state.sizeRanges.filter(r => r.id !== id);
+    render();
+  } catch(e) { showToast(e.message); }
+}
+function openSizeAdmin(){
+  pushScreen('size-admin');
+  state.screen = 'sizeAdmin';
+  render();
+}
+function closeSizeAdmin(){ history.back(); }
 
 // Shown above everything else so a merchandiser opening a shared link can
 // add the app to their home screen immediately, without hunting through the
@@ -301,10 +1240,12 @@ function render(){
   if (state.screen === 'loading') html = renderLoading();
   else if (state.screen === 'login') html = renderLogin();
   else if (state.screen === 'home') html = renderHome();
-  else if (state.screen === 'create') html = renderCreate();
+  else if (state.screen === 'form') html = renderFormScreen();
   else if (state.screen === 'browse') html = renderBrowse();
   else if (state.screen === 'detail') html = renderDetail();
   else if (state.screen === 'success') html = renderSuccess();
+  else if (state.screen === 'specAdmin') html = renderSpecAdmin();
+  else if (state.screen === 'sizeAdmin') html = renderSizeAdmin();
   app.innerHTML = renderInstallBanner() + html + renderLightbox();
 
   const loginForm = document.getElementById('loginForm');
@@ -320,6 +1261,8 @@ async function checkSession(){
     const data = await res.json();
     state.user = data.user;
     state.screen = 'home';
+    replaceScreen('home');
+    if (hasConceptsPermission()) loadLookupData();
   } catch (e) {
     state.screen = 'login';
   }
@@ -347,6 +1290,8 @@ async function login(){
     state.user = data.user;
     state.loginBusy = false;
     state.screen = 'home';
+    replaceScreen('home');
+    if (hasConceptsPermission()) loadLookupData();
     render();
   } catch (e) {
     state.loginError = 'Could not reach the server';
@@ -357,14 +1302,14 @@ async function login(){
 
 async function logout(){
   try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
-  state.photos.forEach(p => URL.revokeObjectURL(p.previewUrl));
+  if (state.form) (state.form.pendingFiles||[]).forEach(p => URL.revokeObjectURL(p.previewUrl));
   state.user = null;
-  state.department = null;
-  state.description = '';
-  state.photos = [];
-  state.submitError = '';
-  state.validationHint = '';
+  state.form = null;
   state.lastCreated = null;
+  state.fabrics = [];
+  state.specCategories = [];
+  state.sizeRanges = [];
+  state.specAdmin = null;
   state.concepts = [];
   state.conceptsError = '';
   state.browseFilter = '';
@@ -372,22 +1317,108 @@ async function logout(){
   state.conceptDetailError = '';
   state.lightboxUrl = null;
   state.screen = 'login';
+  history.replaceState(null, '', location.pathname);
   render();
+}
+
+// Fetched once after login (and again after any spec/size-range admin
+// change) - the create/edit form's Fabric/Spec/Sizes fields and the
+// read-only detail view's Spec/Sizes labels all read from these.
+async function loadLookupData(){
+  try {
+    // Factory names 403 for buyer role (they never see the Factory field,
+    // stripped server-side) - fetched anyway and just ignored on failure,
+    // simpler than threading role into this shared loader.
+    const [specRes, sizeRes, fabRes, factoryRes] = await Promise.all([
+      fetch('/api/spec-categories'), fetch('/api/size-ranges'), fetch('/api/fabrics'), fetch('/api/concepts/factory-names')
+    ]);
+    if (specRes.ok) state.specCategories = (await specRes.json()).categories;
+    if (sizeRes.ok) state.sizeRanges = (await sizeRes.json()).ranges;
+    if (fabRes.ok) state.fabrics = (await fabRes.json()).fabrics;
+    if (factoryRes.ok) state.factoryNames = (await factoryRes.json()).factories;
+    render();
+  } catch(e) { /* non-critical - forms just show empty dropdowns until this succeeds */ }
 }
 
 // ---- Navigation ----
+//
+// The phone's hardware/gesture back button fires the browser's native
+// back/forward navigation, not any code of ours - the only way to hook into
+// it is via the History API. Each in-app screen gets a real history entry
+// (as a URL hash) when navigated to going "forward" (the various open*
+// functions), and a 'popstate' listener re-derives state.screen from
+// whatever hash the user lands on when they go back/forward - including via
+// the hardware button. In-app back arrows call history.back() instead of
+// navigating directly, so they produce the exact same popstate event and
+// stay perfectly in sync with the hardware button rather than growing a
+// parallel, divergent stack.
 
-function goHome(){
-  state.screen = 'home';
-  render();
+function pushScreen(hash){
+  if (location.hash !== '#' + hash) history.pushState({ screen: hash }, '', '#' + hash);
+}
+function replaceScreen(hash){
+  history.replaceState({ screen: hash }, '', '#' + hash);
 }
 
-function goToCreate(){
-  state.screen = 'create';
+function applyScreenFromHash(hash){
+  if (!state.user) return; // still on login/loading - hash routing doesn't apply yet
+  if (hash === 'create') {
+    if (!state.form || !state.form.isNew) state.form = blankFormState(true);
+    state.screen = 'form';
+    render();
+  } else if (hash.indexOf('edit-') === 0) {
+    const id = parseInt(hash.slice(5), 10);
+    if (state.form && !state.form.isNew && state.form.id === id) {
+      state.screen = 'form';
+      render();
+    } else {
+      loadEditForm(id);
+    }
+  } else if (hash === 'browse') {
+    state.screen = 'browse';
+    render();
+    if (!state.concepts.length) loadConcepts();
+  } else if (hash.indexOf('detail-') === 0) {
+    const id = parseInt(hash.slice(7), 10);
+    if (state.conceptDetail && state.conceptDetail.concept && state.conceptDetail.concept.id === id) {
+      state.screen = 'detail';
+      render();
+    } else {
+      loadConceptDetail(id);
+    }
+  } else if (hash === 'success') {
+    if (state.lastCreated) { state.screen = 'success'; render(); }
+    else { history.back(); } // stale success state (already reset) - just keep going back
+  } else if (hash === 'spec-admin') {
+    if (!state.specAdmin) state.specAdmin = { department: DEPARTMENTS[0] };
+    state.screen = 'specAdmin';
+    render();
+  } else if (hash === 'size-admin') {
+    state.screen = 'sizeAdmin';
+    render();
+  } else {
+    state.screen = 'home';
+    render();
+  }
+}
+
+window.addEventListener('popstate', () => {
+  applyScreenFromHash(location.hash.replace(/^#/, ''));
+});
+
+function goHome(){
+  history.back();
+}
+
+function openCreateConcept(){
+  state.form = blankFormState(true);
+  pushScreen('create');
+  state.screen = 'form';
   render();
 }
 
 function goToBrowse(){
+  pushScreen('browse');
   state.screen = 'browse';
   render();
   if (!state.concepts.length) loadConcepts();
@@ -416,7 +1447,21 @@ function selectBrowseFilter(d){
   render();
 }
 
-async function openConceptDetail(id){
+// Tapping a concept in Browse goes straight into the full editable form for
+// anyone who can actually edit (no extra "Edit Concept" tap first) - buyers
+// can't edit at all (blocked server-side, same as desktop), so they still
+// land on the read-only Detail view instead.
+function openConceptFromBrowse(id){
+  if (state.user.role !== 'buyer') openEditConcept(id);
+  else openConceptDetail(id);
+}
+
+function openConceptDetail(id){
+  pushScreen('detail-' + id);
+  loadConceptDetail(id);
+}
+
+async function loadConceptDetail(id){
   state.screen = 'detail';
   state.conceptDetail = null;
   state.conceptDetailLoading = true;
@@ -435,9 +1480,7 @@ async function openConceptDetail(id){
 }
 
 function closeDetail(){
-  state.screen = 'browse';
-  state.conceptDetail = null;
-  render();
+  history.back();
 }
 
 function openLightbox(url){
@@ -450,17 +1493,51 @@ function closeLightbox(){
   render();
 }
 
-// ---- Create form actions ----
+// ---- Edit an existing concept ----
 
-function selectDepartment(d){
-  state.department = d;
-  state.validationHint = '';
+function openEditConcept(id){
+  pushScreen('edit-' + id);
+  loadEditForm(id);
+}
+
+async function loadEditForm(id){
+  state.screen = 'form';
+  state.form = null;
+  render();
+  try {
+    const res = await fetch('/api/concepts/' + id);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not load this concept');
+    const c = data.concept;
+    const concept = blankFormConcept();
+    Object.keys(concept).forEach(k => { if (c[k] != null) concept[k] = c[k]; });
+    state.form = {
+      isNew: false, id: c.id, concept_no: c.concept_no, concept, specCategoryId: c.spec_category_id || null,
+      photos: data.photos || [], pendingFiles: [], tab: 'details', submitting: false, error: '', validationHint: '',
+      cadBusy: false, cadPreview: null, conversions: data.conversions || [],
+    };
+    render();
+  } catch (e) {
+    state.form = { loadError: e.message || 'Could not reach the server' };
+    render();
+  }
+}
+
+function resetForm(targetScreen){
+  state.lastCreated = null;
+  if (targetScreen === 'home') {
+    state.form = null;
+    pushScreen('home');
+    state.screen = 'home';
+  } else {
+    state.form = blankFormState(true);
+    pushScreen('create');
+    state.screen = 'form';
+  }
   render();
 }
 
-function updateDescription(v){
-  state.description = v; // no re-render needed, textarea already reflects the keystroke
-}
+// ---- Camera/gallery/CAD-file pickers ----
 
 function openCamera(){
   const input = document.getElementById('cameraInput');
@@ -477,75 +1554,34 @@ function openGallery(){
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('cameraInput').addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    state.photos.push({ file, previewUrl: URL.createObjectURL(file) });
-    state.validationHint = '';
-    render();
+    if (!file || !state.form) return;
+    if (state.form.isNew) {
+      state.form.pendingFiles.push({ file, previewUrl: URL.createObjectURL(file) });
+      state.form.validationHint = '';
+      render();
+    } else {
+      uploadFormPhotos([file]);
+    }
   });
 
   document.getElementById('galleryInput').addEventListener('change', (e) => {
     const files = Array.from(e.target.files || []);
-    if (!files.length) return;
-    files.forEach(file => state.photos.push({ file, previewUrl: URL.createObjectURL(file) }));
-    state.validationHint = '';
-    render();
+    if (!files.length || !state.form) return;
+    if (state.form.isNew) {
+      files.forEach(file => state.form.pendingFiles.push({ file, previewUrl: URL.createObjectURL(file) }));
+      state.form.validationHint = '';
+      render();
+    } else {
+      uploadFormPhotos(files);
+    }
+  });
+
+  document.getElementById('cadFileInput').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (file && state.form && !state.form.isNew) uploadFormCadMain(file);
   });
 });
-
-function removePhoto(i){
-  const p = state.photos[i];
-  if (p) URL.revokeObjectURL(p.previewUrl);
-  state.photos.splice(i, 1);
-  render();
-}
-
-async function submitConcept(){
-  if (state.submitting) return;
-  if (!state.department) { state.validationHint = 'Please select a department'; return render(); }
-  if (!state.photos.length) { state.validationHint = 'Please take at least one photo'; return render(); }
-
-  state.submitting = true;
-  state.validationHint = '';
-  state.submitError = '';
-  render();
-
-  try {
-    const form = new FormData();
-    form.append('department', state.department);
-    form.append('description', state.description || '');
-    state.photos.forEach(p => form.append('photos', p.file, p.file.name || 'photo.jpg'));
-
-    const res = await fetch('/api/concepts', { method: 'POST', body: form });
-    const data = await res.json();
-    if (!res.ok) {
-      state.submitting = false;
-      state.submitError = data.error || 'Could not create the concept';
-      return render();
-    }
-    state.submitting = false;
-    state.lastCreated = { concept_no: data.concept.concept_no, department: data.concept.department };
-    // A newly created concept invalidates the cached browse list - refetch next visit.
-    state.concepts = [];
-    state.screen = 'success';
-    render();
-  } catch (e) {
-    state.submitting = false;
-    state.submitError = 'Could not reach the server - check your connection and try again';
-    render();
-  }
-}
-
-function resetForm(targetScreen){
-  state.photos.forEach(p => URL.revokeObjectURL(p.previewUrl));
-  state.department = null;
-  state.description = '';
-  state.photos = [];
-  state.submitError = '';
-  state.validationHint = '';
-  state.lastCreated = null;
-  state.screen = targetScreen || 'create';
-  render();
-}
 
 // ---- Install prompt ----
 

@@ -69,7 +69,7 @@ router.post('/oauth/authorize/login', (req, res) => {
   if (!user || user.role !== 'admin' || !bcrypt.compareSync(password||'', user.password_hash)) {
     return res.send(renderAuthPage({ mode:'login', qs, error:'Invalid email/password, or this account is not an admin.' }));
   }
-  req.session.user = { id:user.id, name:user.name, role:user.role, retailer:user.retailer, department:user.department };
+  req.session.user = { id:user.id, name:user.name, email:user.email, role:user.role, retailer:user.retailer, department:user.department };
   const params = new URLSearchParams(qs);
   const client = db.prepare('SELECT * FROM oauth_clients WHERE client_id = ?').get(params.get('client_id'));
   res.send(renderAuthPage({ mode:'consent', qs, clientName: client ? client.client_name : 'MCP client', userName: user.name }));

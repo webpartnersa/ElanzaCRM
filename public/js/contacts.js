@@ -38,8 +38,8 @@ function renderContactsView(){
     <tr>
       <td class="name-cell">${c.first_name} ${c.last_name}</td>
       <td><span class="position-badge ${positionBadgeClass(c.position)}">${c.position}</span></td>
-      <td>${c.retailer}</td>
-      <td>${c.department}</td>
+      <td>${c.retailer||''}</td>
+      <td>${c.department||''}</td>
       <td class="mono">${c.phone||''}</td>
       <td>${c.email||''}</td>
       <td style="text-align:right;"><button class="btn btn-ghost btn-sm" onclick="openEditContact(${c.id})">Edit</button></td>
@@ -124,13 +124,13 @@ async function saveContact(){
   const first_name = document.getElementById('cn-first_name').value.trim();
   const last_name = document.getElementById('cn-last_name').value.trim();
   if (!first_name || !last_name) { toast('First and last name are required'); return; }
+  const position = document.getElementById('cn-position').value;
   const body = {
-    first_name, last_name,
-    position: document.getElementById('cn-position').value,
-    retailer: document.getElementById('cn-retailer').value,
-    department: document.getElementById('cn-department').value,
+    first_name, last_name, position,
     phone: document.getElementById('cn-phone').value.trim(),
     email: document.getElementById('cn-email').value.trim(),
+    retailer: document.getElementById('cn-retailer').value,
+    department: document.getElementById('cn-department').value,
   };
   try {
     const { isNew, contact } = state.contactDrawer;

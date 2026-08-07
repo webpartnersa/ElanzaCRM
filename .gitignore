@@ -8,3 +8,7 @@ docket-portal.db-wal
 *.log
 .claude/settings.local.json
 *.xlsx
+*.xls
+docket-portal.db.bak-*
+fabric-reports/
+worksheet-po/

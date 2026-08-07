@@ -585,21 +585,25 @@ function openShippingDrawer(orderId, tab){
 function closeShippingDrawer(){ state.shippingDrawer = null; render(); }
 function setShippingDrawerTab(tab){ state.shippingDrawer.tab = tab; render(); }
 
-// Autofills composition + fabric test number from the picked fabric's
-// management-page record. Writes directly onto the in-memory order (not just
-// the DOM) since composition lives on the Product tab while this select
-// lives on Factory - same cross-tab pattern the drawer already relies on
-// (setShippingDrawerTab re-renders from `o` without capturing DOM first).
+// Autofills composition + fabric test number from the picked fabric code.
+// Composition comes from the fabrics master record; fabric test number
+// comes from that code's most recent uploaded test report (fabrics itself
+// no longer carries report_number - only code/composition/weight do).
+// Writes directly onto the in-memory order (not just the DOM) since
+// composition lives on the Product tab while this select lives on Factory -
+// same cross-tab pattern the drawer already relies on (setShippingDrawerTab
+// re-renders from `o` without capturing DOM first).
 function onFabricCodePicked(code){
   if (!state.shippingDrawer) return;
   const found = findShippingOrder(state.shippingDrawer.orderId);
   if (!found) return;
   found.order.fabric_code = code;
   const fab = (state.fabrics||[]).find(f=>f.code===code);
-  if (fab) {
-    found.order.composition = fab.composition || '';
-    found.order.fabric_test = fab.report_number || '';
-  }
+  if (fab) found.order.composition = fab.composition || '';
+  const latestReport = (state.fabricReports||[])
+    .filter(r=>r.fabric_code===code)
+    .sort((a,b)=>(b.report_date||'').localeCompare(a.report_date||''))[0];
+  if (latestReport) found.order.fabric_test = latestReport.report_number || '';
   render();
 }
 
@@ -678,7 +682,7 @@ function renderShippingDrawerHost(){
               <option value="">- Select -</option>
               ${(state.fabrics||[]).slice().sort((a,b)=>a.code.localeCompare(b.code)).map(f=>`<option value="${f.code}" ${o.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
             </select>
-            <div class="hint" style="margin-top:4px;">Selecting a code autofills Composition &amp; Fabric test number below. <a href="#" onclick="goto('fabrics');return false;">Manage fabrics</a></div>
+            <div class="hint" style="margin-top:4px;">Selecting a code autofills Composition &amp; Fabric test number below. <a href="#" onclick="goto('fabrics');showFabricCodesList();return false;">Manage fabrics</a></div>
           </div>
           ${field('sent_to_factory','Date order sent to factory')}
           ${field('cads','CADs')}

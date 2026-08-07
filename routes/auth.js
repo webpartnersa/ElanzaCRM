@@ -11,7 +11,7 @@ router.post('/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
-  req.session.user = { id: user.id, name: user.name, role: user.role, retailer: user.retailer, department: user.department, permissions: user.permissions || '' };
+  req.session.user = { id: user.id, name: user.name, email: user.email, role: user.role, retailer: user.retailer, department: user.department, permissions: user.permissions || '' };
   res.json({ user: req.session.user });
 });
 

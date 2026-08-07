@@ -24,7 +24,7 @@ async function doLogin(){
   const password = document.getElementById('li-pass').value;
   try {
     const { user } = await api('/api/login', { method:'POST', body: JSON.stringify({email,password}) });
-    state.user = user; state.view='dashboard'; await loadStyles();
+    await bootstrapApp(user);
   } catch(e) {
     const err = document.getElementById('login-err'); err.textContent = e.message; err.classList.remove('hidden');
   }

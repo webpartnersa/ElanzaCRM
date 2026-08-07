@@ -5,9 +5,14 @@ const path = require('path');
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 const { PDFDocument } = require('pdf-lib');
+const sharp = require('sharp');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile } = require('../lib/imageConvert');
+const { translateConceptFields, translateMessage, REQUEST_TYPES, LABELS } = require('../lib/conceptCostingTranslate');
+const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/conceptCostingEmailHtml');
+const { buildGenericRequestEmailHtml, buildGenericRequestPlainText } = require('../lib/conceptGenericRequestEmailHtml');
+const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
 
 const router = express.Router();
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -43,8 +48,18 @@ function nextConceptNo(department) {
 // concepts have their own field set.
 const BUYER_VISIBLE_CONCEPT_FIELDS = [
   'id', 'concept_no', 'department', 'description', 'source', 'tags',
-  'favourite', 'cover_photo', 'has_cad', 'concept_date', 'created_at', 'updated_at'
+  'cover_photo', 'has_cad', 'concept_date', 'created_at', 'updated_at',
+  'spec_category_id', 'size_range_id'
 ];
+
+// '' from a form field means "not set" here, not the literal string '' -
+// keeps spec_category_id/size_range_id genuinely NULL (a real FK or
+// nothing) rather than an empty string that would break lookups.
+function toIntOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = parseInt(v, 10);
+  return isNaN(n) ? null : n;
+}
 function scopeConceptForRole(concept, user) {
   if (user.role !== 'buyer') return concept;
   const scoped = {};
@@ -118,6 +133,20 @@ router.get('/', requireAuth, requirePermission('concepts'), (req, res) => {
   res.json({ concepts: rows.map(c => scopeConceptForRole(c, user)) });
 });
 
+// Backs the Concept drawer's Factory dropdown (see public/js/concepts.js /
+// public/mobile/app.js) - just the company names, not full contact records
+// (email/phone), so this can sit under the 'concepts' permission rather
+// than requiring the separate 'contacts' one just to pick a factory. Buyers
+// never see the Factory field at all (stripped server-side elsewhere), so
+// this is blocked for them too rather than leaking factory names. Has to
+// be registered before the '/:id' route below - Express would otherwise
+// match 'factory-names' as an :id and 404 on it as a nonexistent concept.
+router.get('/factory-names', requireAuth, requirePermission('concepts'), (req, res) => {
+  if (req.session.user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const rows = db.prepare('SELECT name FROM factories ORDER BY name ASC').all();
+  res.json({ factories: rows.map(r => r.name) });
+});
+
 router.get('/:id', requireAuth, requirePermission('concepts'), (req, res) => {
   const user = req.session.user;
   const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
@@ -136,21 +165,36 @@ router.get('/:id', requireAuth, requirePermission('concepts'), (req, res) => {
 // reference photos can be created in one atomic request - avoids the
 // two-request "create, then separately upload" sequence that had photos
 // silently going missing depending on exactly when the second request ran.
+// Plain TEXT fields that need no special coercion (not department/
+// concept_no/concept_date/spec_category_id/size_range_id, which all have
+// their own defaulting/type handling below) - the rest of the single-drawer
+// field set, so adding another simple text field later means touching this
+// list, not the INSERT's positional params.
+const CONCEPT_TEXT_FIELDS = [
+  'description', 'source', 'tags', 'cost_estimate', 'factory', 'shipping_date',
+  'fabric_code', 'composition', 'weight', 'wash', 'colour', 'print', 'embroidery_applique',
+  'topstitching', 'trims', 'styling', 'units', 'packing', 'labels', 'dc_date',
+  'buyer_rand_target', 'buyer_rsp_target', 'factory_target_price', 'factory_price', 'factory_cost_options'
+];
+
 router.post('/', requireAuth, upload.array('photos', 10), async (req, res) => {
   const user = req.session.user;
   if (user.role === 'buyer') return res.status(403).json({ error: 'Buyers cannot create concepts' });
-  const { department, description, source, tags, cost_estimate, factory, shipping_date, favourite, concept_date } = req.body || {};
+  const { department, concept_date, spec_category_id, size_range_id } = req.body || {};
   if (!department || !DEPT_CODES[department]) return res.status(400).json({ error: 'A valid department is required' });
   const conceptNo = nextConceptNo(department);
   const finalConceptDate = concept_date || new Date().toISOString().slice(0, 7); // 'YYYY-MM' - editable afterwards
+
+  const cols = ['concept_no', 'department', 'concept_date', 'spec_category_id', 'size_range_id', ...CONCEPT_TEXT_FIELDS];
+  const values = [
+    conceptNo, department, finalConceptDate,
+    toIntOrNull(spec_category_id), toIntOrNull(size_range_id),
+    ...CONCEPT_TEXT_FIELDS.map(f => (req.body[f] || '').toString().trim() || null)
+  ];
   const info = db.prepare(`
-    INSERT INTO concepts (concept_no, department, description, concept_date, source, tags, cost_estimate, factory, shipping_date, favourite)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
-  `).run(
-    conceptNo, department, (description || '').trim(), finalConceptDate,
-    source || null, tags || null, cost_estimate || null, factory || null, shipping_date || null,
-    (favourite === '1' || favourite === 1 || favourite === true) ? 1 : 0
-  );
+    INSERT INTO concepts (${cols.join(', ')})
+    VALUES (${cols.map(() => '?').join(', ')})
+  `).run(...values);
   const conceptId = info.lastInsertRowid;
   let photoError = null;
   if (req.files && req.files.length) {
@@ -178,10 +222,12 @@ router.put('/:id', requireAuth, (req, res) => {
   const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
   if (!concept) return res.status(404).json({ error: 'Concept not found' });
 
-  const fields = ['description', 'source', 'tags', 'cost_estimate', 'factory', 'shipping_date', 'favourite', 'concept_date', 'cad_description'];
+  const fields = ['concept_date', 'cad_description', ...CONCEPT_TEXT_FIELDS];
   const updates = [];
   const values = [];
   fields.forEach(f => { if (req.body[f] !== undefined) { updates.push(`${f} = ?`); values.push(req.body[f]); } });
+  if (req.body.spec_category_id !== undefined) { updates.push('spec_category_id = ?'); values.push(toIntOrNull(req.body.spec_category_id)); }
+  if (req.body.size_range_id !== undefined) { updates.push('size_range_id = ?'); values.push(toIntOrNull(req.body.size_range_id)); }
 
   // Changing department reassigns the concept's code, since its prefix is
   // department-derived (e.g. CL -> CM) - lets an early mistake be corrected
@@ -448,6 +494,169 @@ router.post('/:id/export-cad-pdf', requireAuth, async (req, res) => {
   }
 });
 
+// Builds "Ladies > Denim > Short" from a leaf spec_categories id, same
+// parent-walk as drawer.js's client-side specCategoryPath - needed here too
+// since it's used server-side (see send-costing-email below).
+function specCategoryPathServer(id) {
+  const byId = {};
+  db.prepare('SELECT id, parent_id, name FROM spec_categories').all().forEach(n => { byId[n.id] = n; });
+  const names = [];
+  let cur = byId[id];
+  while (cur) { names.unshift(cur.name); cur = cur.parent_id ? byId[cur.parent_id] : null; }
+  return names.join(' > ');
+}
+
+// Feeds the "Copy to clipboard" button's HTML table template (see
+// buildCostingEmailHtml in public/js/concepts.js) with the AI-translated
+// field values and the static LABELS map, so the pasted-into-email version
+// stays terminologically in sync with the real Send pipeline's wording
+// rather than drifting as its own hand-maintained copy. JSON, not a
+// document - the client builds the actual markup so it can also embed the
+// photos it already has loaded as data URLs (see loadImageAsDataUrl).
+router.get('/:id/costing-email-data', requireAuth, requirePermission('concepts'), async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+
+  const specPath = concept.spec_category_id ? specCategoryPathServer(concept.spec_category_id) : null;
+  try {
+    const translations = await translateConceptFields({ ...concept, specPath }, openaiClient);
+    res.json({ concept, specPath, translations, labels: LABELS });
+  } catch (e) {
+    console.error('Costing email data failed:', e.message);
+    res.status(500).json({ error: 'Failed to prepare costing request: ' + e.message });
+  }
+});
+
+// Best-guess recipient for the Send button: a Factory contact belonging to
+// the factories-table row whose name matches this concept's free-text
+// Factory field. Exact match first (case-insensitive), then a loose
+// substring match either direction (e.g. concept.factory "Golden Sun"
+// matching a saved "Golden Sun Garments Ltd"), so a close-enough name still
+// prefills - the frontend always shows the picked contact's name before
+// sending, and lets the user pick a different saved contact or type an
+// address by hand instead. `company` is aliased from factories.name so the
+// existing frontend consumers (this drawer's composer, the Style drawer's,
+// and the MCP tool) don't need to change shape.
+router.get('/:id/factory-contact', requireAuth, requirePermission('concepts'), (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+
+  const factoryContacts = db.prepare(`
+    SELECT c.*, f.name AS company FROM contacts c
+    JOIN factories f ON f.id = c.factory_id
+    ORDER BY f.name ASC
+  `).all();
+  let match = null;
+  if (concept.factory && concept.factory.trim()) {
+    const needle = concept.factory.trim().toLowerCase();
+    match = factoryContacts.find(c => (c.company || '').trim().toLowerCase() === needle)
+      || factoryContacts.find(c => {
+        const company = (c.company || '').trim().toLowerCase();
+        return company && (company.includes(needle) || needle.includes(company));
+      })
+      || null;
+  }
+  res.json({ match, factoryContacts });
+});
+
+// Every request type this concept has sent, newest first - feeds the
+// Concept drawer's Requests tab. Separate from GET /api/requests (the
+// all-concepts list behind the main Requests nav section) since the drawer
+// only ever needs one concept's own history, not the whole company's.
+router.get('/:id/requests', requireAuth, requirePermission('concepts'), (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const rows = db.prepare(`
+    SELECT id, concept_id, concept_no, concept_description, request_type, message, sent_to, sent_by_name, subject, resend_id, status, received_at, reminder_count, last_reminder_at, created_at
+    FROM concept_requests WHERE concept_id = ? ORDER BY created_at DESC
+  `).all(req.params.id);
+  res.json({ requests: rows });
+});
+
+// Actually sends a factory request - cost/quotation (built from the
+// concept's own Details/Costing fields, see lib/conceptCostingEmailHtml.js)
+// or one of the free-text types (sample/PP sample/bulk sample/fabric test,
+// see lib/conceptGenericRequestEmailHtml.js) - via Resend's HTTP API (see
+// lib/mailer.js). Photos are embedded as base64 data URIs directly in the
+// HTML, same approach as the clipboard-paste version uses client-side.
+// Every send is logged to concept_requests (exact HTML included) so it
+// shows up in the Requests section as a permanent record of what was sent,
+// when, and to whom.
+router.post('/:id/send-request', requireAuth, requirePermission('concepts'), async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  if (!mailIsConfigured()) return res.status(500).json({ error: 'Email sending is not configured on the server' });
+
+  const to = (req.body && req.body.to || '').trim();
+  if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    return res.status(400).json({ error: 'A valid recipient email is required' });
+  }
+  const requestType = (req.body && req.body.request_type) || 'cost';
+  if (!REQUEST_TYPES[requestType]) return res.status(400).json({ error: 'Invalid request type' });
+  const message = (req.body && req.body.message || '').trim();
+  if (requestType !== 'cost' && !message) {
+    return res.status(400).json({ error: 'A message is required for this request type' });
+  }
+
+  const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
+  if (!concept) return res.status(404).json({ error: 'Concept not found' });
+
+  const specPath = concept.spec_category_id ? specCategoryPathServer(concept.spec_category_id) : null;
+  const photoRows = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id)
+    .filter(p => p.role !== 'cad' && p.role !== 'cad_detail');
+
+  try {
+    let logoDataUrl = null;
+    const logoPath = path.join(__dirname, '..', 'public', 'img', 'main-LOGO-transparent.PNG');
+    if (fs.existsSync(logoPath)) {
+      logoDataUrl = 'data:image/png;base64,' + fs.readFileSync(logoPath).toString('base64');
+    }
+
+    const photos = [];
+    for (const p of photoRows) {
+      const fullPath = resolveUploadPath(p.path);
+      if (!fs.existsSync(fullPath)) continue;
+      try {
+        // Every concept photo is saved as .webp (see lib/imageConvert.js) -
+        // converted to PNG here since inline webp rendering in mail clients
+        // is unreliable, same reasoning as the old PDF export.
+        const pngBuffer = await sharp(fullPath).png().toBuffer();
+        photos.push({ dataUrl: 'data:image/png;base64,' + pngBuffer.toString('base64') });
+      } catch (e) { /* a broken/unreadable photo shouldn't fail the whole send */ }
+    }
+
+    let html, text, subject;
+    if (requestType === 'cost') {
+      const translations = await translateConceptFields({ ...concept, specPath }, openaiClient);
+      html = buildCostingEmailHtml({ concept, specPath, translations, logoDataUrl, photos });
+      text = buildCostingPlainText(concept, specPath);
+      subject = `Quotation - ${concept.concept_no} - ${concept.description || ''}`;
+    } else {
+      const messageZh = await translateMessage(message, openaiClient);
+      html = buildGenericRequestEmailHtml({ concept, requestType, message, messageZh, logoDataUrl, photos });
+      text = buildGenericRequestPlainText({ concept, requestType, message });
+      subject = `${REQUEST_TYPES[requestType].en} - ${concept.concept_no} - ${concept.description || ''}`;
+    }
+
+    const { from, replyTo } = resolveSender(user);
+    const result = await sendMail({ to, subject, html, text, from, replyTo });
+
+    db.prepare(`
+      INSERT INTO concept_requests (concept_id, concept_no, concept_description, request_type, message, sent_to, sent_by_name, subject, html, resend_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+    `).run(concept.id, concept.concept_no, concept.description || '', requestType, requestType === 'cost' ? null : message, to, user.name || '', subject, html, result.id || null);
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Request send failed:', e.message);
+    res.status(500).json({ error: 'Failed to send: ' + e.message });
+  }
+});
+
 // ---- Conversion logging (called by the frontend right after a style is
 // created from this concept - see drawer.js saveStyle) ----
 router.post('/:id/conversions', requireAuth, (req, res) => {
@@ -471,7 +680,7 @@ router.post('/:id/conversions', requireAuth, (req, res) => {
 // as the style's CAD image rather than just another reference photo. Detail
 // crops (role='cad_detail') aren't carried over - that feature isn't part
 // of the style CAD tab.
-router.post('/:id/copy-photos-to-style/:styleId', requireAuth, (req, res) => {
+router.post('/:id/copy-photos-to-style/:styleId', requireAuth, async (req, res) => {
   const user = req.session.user;
   if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
   const style = db.prepare('SELECT style_no FROM styles WHERE id = ?').get(req.params.styleId);
@@ -479,21 +688,31 @@ router.post('/:id/copy-photos-to-style/:styleId', requireAuth, (req, res) => {
   const conceptPhotos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(req.params.id);
   if (!conceptPhotos.length) return res.json({ copied: 0 });
 
-  const insertRef = db.prepare('INSERT INTO photos (style_id, path) VALUES (?,?)');
+  const insertRef = db.prepare('INSERT INTO photos (style_id, path, thumb_path) VALUES (?,?,?)');
   const insertCad = db.prepare("INSERT INTO photos (style_id, path, role) VALUES (?,?,'cad')");
   const styleCadDir = path.join(UPLOAD_DIR, 'styles');
   fs.mkdirSync(styleCadDir, { recursive: true });
   let copied = 0;
 
-  conceptPhotos.filter(p => p.role !== 'cad' && p.role !== 'cad_detail').forEach(p => {
+  for (const p of conceptPhotos.filter(p => p.role !== 'cad' && p.role !== 'cad_detail')) {
     const ext = path.extname(p.path);
     const destName = `style-${req.params.styleId}-${Date.now()}-${Math.random().toString(36).slice(2,8)}${ext}`;
     try {
       fs.copyFileSync(resolveUploadPath(p.path), path.join(UPLOAD_DIR, destName));
-      insertRef.run(req.params.styleId, '/uploads/' + destName);
+      let thumbUrl = null;
+      const thumbName = destName.replace(ext, '') + '-thumb.webp';
+      try {
+        if (p.thumb_path) {
+          fs.copyFileSync(resolveUploadPath(p.thumb_path), path.join(UPLOAD_DIR, thumbName));
+        } else {
+          await makeThumbnailFile(fs.readFileSync(resolveUploadPath(p.path)), path.join(UPLOAD_DIR, thumbName));
+        }
+        thumbUrl = '/uploads/' + thumbName;
+      } catch (e) { /* missing/ungeneratable thumb shouldn't block copying the full photo */ }
+      insertRef.run(req.params.styleId, '/uploads/' + destName, thumbUrl);
       copied++;
     } catch (e) { /* skip missing files silently */ }
-  });
+  }
 
   const cadPhoto = conceptPhotos.find(p => p.role === 'cad');
   if (cadPhoto) {

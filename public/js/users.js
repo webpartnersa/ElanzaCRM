@@ -35,7 +35,7 @@ function renderUsersTab(){
         <div class="user-row">
           <div>
             <div class="user-name">${u.name} <span class="badge ${u.role}">${u.role}</span></div>
-            <div class="user-meta">${u.email}${u.role==='buyer' ? ` · ${u.retailer} · ${u.department}` : ''}</div>
+            <div class="user-meta">${u.email}${u.role==='buyer' ? ` · ${u.retailer} · ${u.department}` : ''}${u.has_pin ? ' · PIN set' : ''}</div>
           </div>
           <div class="row-actions">
             <button class="btn btn-ghost btn-sm" onclick='openEditUser(${u.id})'>Edit</button>
@@ -90,7 +90,7 @@ async function deleteUser(id, name){
   catch(e) { alert(e.message); }
 }
 
-const PERMISSION_SECTIONS = [['styles','Styles'],['concepts','Concepts'],['shipping','Orders'],['contacts','Contacts'],['fabrics','Fabrics']];
+const PERMISSION_SECTIONS = [['styles','Styles'],['concepts','Concepts'],['shipping','Orders'],['contacts','Contacts'],['fabrics','Fabrics'],['factories','Factories']];
 
 function renderUserFormModal(u){
   const isEdit = !!u;
@@ -103,10 +103,16 @@ function renderUserFormModal(u){
         <h2>${isEdit ? 'Edit user' : 'New user'}</h2>
         <div id="uf-err" class="err hidden"></div>
         <div class="field"><label>Full name</label><input id="uf-name" value="${u?u.name:''}"/></div>
-        ${!isEdit ? `<div class="field"><label>Email</label><input id="uf-email" type="email" autocomplete="off"/></div>` : ''}
+        <div class="field"><label>Email</label><input id="uf-email" type="email" autocomplete="off" value="${isEdit?u.email:''}"/></div>
+        ${isEdit ? `<div class="hint" style="margin-top:-8px;">This is also the address quotation request emails send from, if it's on the elanzas.com domain.</div>` : ''}
         <div class="field">
           <label>${isEdit ? 'Set new password (leave blank to keep current)' : 'Password'}</label>
           <input id="uf-password" type="password" autocomplete="new-password"/>
+        </div>
+        <div class="field">
+          <label>${isEdit && u.has_pin ? 'Set new PIN (leave blank to keep current)' : 'PIN (optional)'}</label>
+          <input id="uf-pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off"/>
+          <div class="hint" style="margin-top:2px;">4-6 digits. Lets this person identify themselves to Claude Voice over the Elanza CRM connector, since voice can't sign in normally - actions taken after they give the right PIN are attributed to them (their name, their "from" email).${isEdit && u.has_pin ? ' A PIN is already set.' : ''}</div>
         </div>
         <div class="field">
           <label>Role</label>
@@ -148,7 +154,9 @@ function toggleBuyerFields(){
 
 async function submitUserForm(id){
   const name = document.getElementById('uf-name').value.trim();
+  const email = document.getElementById('uf-email').value.trim();
   const password = document.getElementById('uf-password').value;
+  const pin = document.getElementById('uf-pin').value.trim();
   const role = document.getElementById('uf-role').value;
   const retailer = document.getElementById('uf-retailer') ? document.getElementById('uf-retailer').value.trim() : '';
   const department = document.getElementById('uf-department') ? document.getElementById('uf-department').value.trim() : '';
@@ -158,12 +166,12 @@ async function submitUserForm(id){
   const errEl = document.getElementById('uf-err');
   try {
     if (id) {
-      const body = { name, role, retailer, department, permissions };
+      const body = { name, email, role, retailer, department, permissions };
       if (password) body.new_password = password;
+      if (pin) body.pin = pin;
       await api('/api/admin/users/'+id, { method:'PUT', body: JSON.stringify(body) });
     } else {
-      const email = document.getElementById('uf-email').value.trim();
-      await api('/api/admin/users', { method:'POST', body: JSON.stringify({name, email, password, role, retailer, department, permissions}) });
+      await api('/api/admin/users', { method:'POST', body: JSON.stringify({name, email, password, role, retailer, department, permissions, pin: pin || undefined}) });
     }
     closeModal();
     await loadUsers();

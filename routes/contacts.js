@@ -19,29 +19,36 @@ function blockBuyerWrite(req, res, next) {
 
 router.get('/', (req, res) => {
   const user = req.session.user;
-  // A buyer only ever needs contacts for their own retailer+department -
-  // the whole company directory (other retailers' buyer names, numbers,
-  // emails) isn't theirs to see, same scoping principle as Styles.
+  // Factory contacts have moved to their own Factories section (see
+  // routes/factories.js) - excluded here so this list is just Buyer/
+  // Planner/QC/Other again. A buyer only ever needs contacts for their own
+  // retailer+department - the whole company directory (other retailers'
+  // buyer names, numbers, emails) isn't theirs to see, same scoping
+  // principle as Styles.
   const rows = user.role === 'buyer'
-    ? db.prepare('SELECT * FROM contacts WHERE retailer = ? AND department = ? ORDER BY last_name ASC').all(user.retailer, user.department)
-    : db.prepare('SELECT * FROM contacts ORDER BY retailer ASC, department ASC, last_name ASC').all();
+    ? db.prepare("SELECT * FROM contacts WHERE retailer = ? AND department = ? AND position != 'Factory' ORDER BY last_name ASC").all(user.retailer, user.department)
+    : db.prepare("SELECT * FROM contacts WHERE position != 'Factory' ORDER BY retailer ASC, department ASC, last_name ASC").all();
   res.json({ contacts: rows });
 });
 
 router.post('/', blockBuyerWrite, (req, res) => {
   const { first_name, last_name, position, phone, email, retailer, department } = req.body || {};
-  if (!first_name || !last_name || !retailer || !department) {
-    return res.status(400).json({ error: 'First name, last name, retailer and department are required' });
+  if (!first_name || !last_name) {
+    return res.status(400).json({ error: 'First name and last name are required' });
   }
   if (position && !POSITIONS.includes(position)) {
     return res.status(400).json({ error: 'Invalid position' });
+  }
+  if (!retailer || !department) {
+    return res.status(400).json({ error: 'Retailer and department are required' });
   }
   const info = db.prepare(`
     INSERT INTO contacts (first_name, last_name, position, phone, email, retailer, department)
     VALUES (?,?,?,?,?,?,?)
   `).run(
     first_name.trim(), last_name.trim(), position || 'Other',
-    (phone || '').trim(), (email || '').trim(), retailer.trim(), department.trim()
+    (phone || '').trim(), (email || '').trim(),
+    retailer.trim(), department.trim()
   );
   const created = db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid);
   res.json({ contact: created });
