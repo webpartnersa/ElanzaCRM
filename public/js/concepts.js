@@ -992,6 +992,7 @@ function renderConceptDrawerContent(){
     <div class="drawer-body">${renderConceptDrawerBody()}</div>
     <footer class="drawer-actions">
       ${(!isNew && canEdit) ? `<button class="btn btn-danger" style="margin-right:auto;" onclick="deleteConcept(${c.id}, '${c.concept_no}')">Delete</button>` : ''}
+      ${(!isNew && canEdit) ? `<button class="btn btn-ghost" onclick="shareConceptWhatsApp()">Share via WhatsApp</button>` : ''}
       ${(!isNew && canEdit) ? `<button class="btn btn-ghost" onclick="convertConceptToStyle(${c.id})">Convert to style</button>` : ''}
       ${canEdit ? `<button class="btn btn-primary" onclick="saveConcept()">${isNew ? 'Create concept' : 'Save changes'}</button>` : ''}
     </footer>`;
@@ -1397,4 +1398,52 @@ function convertConceptToStyle(conceptId){
   const c = state.conceptDrawer.concept;
   closeConceptDrawer();
   openNewStyle({ department: c.department, conceptId: c.id, conceptNo: c.concept_no, fromConcept: c });
+}
+
+// Shares the concept's first 2 reference photos (excludes the generated
+// CAD - that's a separate, already-composited front+back image, not one of
+// the raw references) straight to WhatsApp with the concept code as the
+// message text. Uses the Web Share API (navigator.share with real File
+// objects) where the browser supports sharing files - the only way to get
+// actual attachments into WhatsApp from a web app, since wa.me links only
+// support prefilled text, never media. Where that's not supported (most
+// desktop browsers), falls back to downloading the photos and opening a
+// WhatsApp Web chat prefilled with the concept code to paste them into.
+async function shareConceptWhatsApp(){
+  const { concept: c, photos } = state.conceptDrawer;
+  const refPhotos = (photos||[]).filter(p => p.role !== 'cad' && p.role !== 'cad_detail').slice(0, 2);
+  if (!refPhotos.length) { toast('No photos to share yet'); return; }
+
+  let files = [];
+  try {
+    files = await Promise.all(refPhotos.map(async (p, i) => {
+      const res = await fetch(p.path);
+      const blob = await res.blob();
+      const ext = (p.path.split('.').pop() || 'jpg').split('?')[0];
+      return new File([blob], `${c.concept_no}-${i+1}.${ext}`, { type: blob.type || 'image/jpeg' });
+    }));
+  } catch(e) {
+    toast('Could not load photos: ' + e.message);
+    return;
+  }
+
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try {
+      await navigator.share({ files, text: c.concept_no });
+    } catch(e) {
+      if (e.name !== 'AbortError') toast('Could not share: ' + e.message);
+    }
+    return;
+  }
+
+  refPhotos.forEach((p, i) => {
+    const a = document.createElement('a');
+    a.href = p.path;
+    a.download = `${c.concept_no}-${i+1}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  window.open(`https://wa.me/?text=${encodeURIComponent(c.concept_no)}`, '_blank');
+  toast('Photos downloaded - attach them in the WhatsApp chat that just opened');
 }

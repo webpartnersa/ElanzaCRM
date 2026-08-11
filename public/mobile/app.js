@@ -1027,7 +1027,8 @@ function renderDetail(){
       </div>
       ${!d.photos.length ? `<div class="section-hint">No photos on this concept.</div>` : ''}
 
-      ${canEdit ? `<button class="btn-block primary" style="margin-top:24px;" onclick="openEditConcept(${d.concept.id})">Edit Concept</button>` : ''}
+      ${canEdit && d.photos.some(p=>p.role!=='cad'&&p.role!=='cad_detail') ? `<button class="btn-block ghost" style="margin-top:24px;" onclick="shareConceptWhatsApp()">Share via WhatsApp</button>` : ''}
+      ${canEdit ? `<button class="btn-block primary" style="margin-top:${d.photos.some(p=>p.role!=='cad'&&p.role!=='cad_detail')?'10px':'24px'};" onclick="openEditConcept(${d.concept.id})">Edit Concept</button>` : ''}
     ` : ''}
   </div>`;
 }
@@ -1491,6 +1492,54 @@ function openLightbox(url){
 function closeLightbox(){
   state.lightboxUrl = null;
   render();
+}
+
+// Shares the concept's first 2 reference photos (excludes the generated
+// CAD - a separate, already-composited front+back image) straight to
+// WhatsApp with the concept code as the message text, via the Web Share
+// API - phones support attaching real files this way, which is the only
+// way to get actual photos into WhatsApp (wa.me links only support
+// prefilled text, never media). Falls back to downloading the photos and
+// opening a WhatsApp Web chat prefilled with the code, for the rare mobile
+// browser that doesn't support file sharing.
+async function shareConceptWhatsApp(){
+  const d = state.conceptDetail;
+  if (!d) return;
+  const refPhotos = (d.photos||[]).filter(p => p.role !== 'cad' && p.role !== 'cad_detail').slice(0, 2);
+  if (!refPhotos.length) return;
+
+  let files = [];
+  try {
+    files = await Promise.all(refPhotos.map(async (p, i) => {
+      const res = await fetch(p.path);
+      const blob = await res.blob();
+      const ext = (p.path.split('.').pop() || 'jpg').split('?')[0];
+      return new File([blob], `${d.concept.concept_no}-${i+1}.${ext}`, { type: blob.type || 'image/jpeg' });
+    }));
+  } catch(e) {
+    state.conceptDetailError = 'Could not load photos: ' + e.message;
+    render();
+    return;
+  }
+
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try {
+      await navigator.share({ files, text: d.concept.concept_no });
+    } catch(e) {
+      if (e.name !== 'AbortError') { state.conceptDetailError = 'Could not share: ' + e.message; render(); }
+    }
+    return;
+  }
+
+  refPhotos.forEach((p, i) => {
+    const a = document.createElement('a');
+    a.href = p.path;
+    a.download = `${d.concept.concept_no}-${i+1}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  window.open(`https://wa.me/?text=${encodeURIComponent(d.concept.concept_no)}`, '_blank');
 }
 
 // ---- Edit an existing concept ----
