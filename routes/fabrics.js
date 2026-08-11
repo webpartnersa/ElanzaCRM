@@ -141,7 +141,19 @@ router.get('/reports', (req, res) => {
 // /test-reports) - feeds the Notification Centre's "Fabric data
 // inconsistencies" section.
 router.get('/report-flags', (req, res) => {
-  const rows = db.prepare('SELECT * FROM fabric_report_flags ORDER BY created_at DESC, id DESC').all();
+  // Joins in report_number/file_path for both sides of the dispute (the
+  // new report that triggered the flag, and whichever earlier report its
+  // values were compared against) so the Notification Centre can link
+  // straight to each PDF without a second round-trip per flag.
+  const rows = db.prepare(`
+    SELECT f.*,
+      newR.report_number AS new_report_number, newR.file_path AS new_report_file_path,
+      oldR.report_number AS old_report_number, oldR.file_path AS old_report_file_path
+    FROM fabric_report_flags f
+    LEFT JOIN fabric_test_reports newR ON newR.id = f.report_id
+    LEFT JOIN fabric_test_reports oldR ON oldR.id = f.old_report_id
+    ORDER BY f.created_at DESC, f.id DESC
+  `).all();
   res.json({ flags: rows });
 });
 
@@ -206,6 +218,15 @@ router.post('/test-reports', blockBuyerWrite, (req, res) => {
   // Captured before the fabrics-table cascade below overwrites these
   // values, since this is a one-time comparison, not a re-derivable state.
   const existingBefore = db.prepare('SELECT * FROM fabrics WHERE code = ?').get(code);
+  // The most recently uploaded report for this code, at this moment - since
+  // fabrics.composition/weight always reflects whichever report was saved
+  // last, this is definitionally the report existingBefore's values came
+  // from, and what an inconsistency flag below should point back to. Fetched
+  // now, before the new report's own INSERT, so it can't accidentally match
+  // itself.
+  const oldReport = existingBefore
+    ? db.prepare('SELECT id FROM fabric_test_reports WHERE fabric_code = ? ORDER BY created_at DESC, id DESC LIMIT 1').get(code)
+    : null;
   let inconsistencyMessage = null;
   if (existingBefore) {
     const compDiffers = existingBefore.composition && composition && normalizedText(existingBefore.composition) !== normalizedText(composition);
@@ -228,8 +249,8 @@ router.post('/test-reports', blockBuyerWrite, (req, res) => {
   relinkReportStyles(info.lastInsertRowid, style_no);
 
   if (inconsistencyMessage) {
-    db.prepare('INSERT INTO fabric_report_flags (fabric_code, report_id, message) VALUES (?, ?, ?)')
-      .run(code, info.lastInsertRowid, inconsistencyMessage);
+    db.prepare('INSERT INTO fabric_report_flags (fabric_code, report_id, old_report_id, message) VALUES (?, ?, ?, ?)')
+      .run(code, info.lastInsertRowid, oldReport ? oldReport.id : null, inconsistencyMessage);
   }
 
   // A report upload writes composition/weight onto fabrics too - fabrics

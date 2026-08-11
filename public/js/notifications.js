@@ -147,11 +147,21 @@ function renderNotificationsView(){
       <div class="card">
         ${inconsistencyAlerts.map(({flag, key})=>{
           const unread = !isNotifRead(key);
+          // Direct links to both PDFs so the dispute can be eyeballed
+          // side-by-side without leaving the Notification Centre - stops
+          // an onclick bubble to the row's own "open the fabric" handler.
+          const reportLink = (num, path) => (num && path)
+            ? `<a href="${path}" target="_blank" rel="noopener" class="mono" onclick="event.stopPropagation()">${num}</a>`
+            : (num || '');
+          const linksHtml = (flag.old_report_number || flag.new_report_number)
+            ? `<div class="style-meta">${reportLink(flag.old_report_number, flag.old_report_file_path)} &rarr; ${reportLink(flag.new_report_number, flag.new_report_file_path)}</div>`
+            : '';
           return `
           <div class="style-row ${unread?'notif-unread':''}" onclick="viewInconsistencyAlert('${flag.fabric_code}','${key}')">
             <div>
               <div class="style-name">${unread?'<span class="notif-dot" title="Unread"></span>':''}${flag.fabric_code}</div>
               <div class="style-meta">${flag.message} &middot; ${formatShipDateShort(flag.created_at.slice(0,10))}</div>
+              ${linksHtml}
             </div>
             <div class="row-actions">
               <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); viewInconsistencyAlert('${flag.fabric_code}','${key}')">View</button>

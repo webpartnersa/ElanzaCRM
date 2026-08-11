@@ -469,6 +469,26 @@ CREATE TABLE IF NOT EXISTS concepts (
   });
 })();
 
+// Which earlier report a fabric_report_flags row's composition/weight
+// dispute was raised against - lets the Notification Centre link straight
+// to both PDFs (see routes/fabrics.js's POST /test-reports and GET
+// /report-flags). Added after the table already existed, so backfilled
+// below for any flag raised before this column did.
+ensureColumn('fabric_report_flags', 'old_report_id', 'INTEGER');
+(function backfillFlagOldReportIds() {
+  const flags = db.prepare('SELECT id, fabric_code, report_id, created_at FROM fabric_report_flags WHERE old_report_id IS NULL').all();
+  const findPrior = db.prepare(`
+    SELECT id FROM fabric_test_reports
+    WHERE fabric_code = ? AND id != ? AND created_at <= ?
+    ORDER BY created_at DESC, id DESC LIMIT 1
+  `);
+  const update = db.prepare('UPDATE fabric_report_flags SET old_report_id = ? WHERE id = ?');
+  flags.forEach(f => {
+    const prior = findPrior.get(f.fabric_code, f.report_id, f.created_at);
+    if (prior) update.run(prior.id, f.id);
+  });
+})();
+
 // Fields a buyer session is allowed to see. Everything else (cost, margin,
 // factory) is stripped server-side before a buyer response is ever sent -
 // this is the enforcement point, not the frontend. Mirrors which fields the
