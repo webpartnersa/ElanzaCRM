@@ -939,21 +939,11 @@ function seed() {
     }
   }
 
-  const styleCount = db.prepare('SELECT COUNT(*) c FROM styles').get().c;
-  if (styleCount === 0) {
-    db.prepare(`
-      INSERT INTO styles (style_no, retailer, department, buyer, description, stage,
-        fabric, colour, wash, units, target_rsp, cost, margin, factory, first_ship, first_delivery)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      'PL425', 'Pick n Pay', 'Ladies', 'Abbey Kilian',
-      'Heart Embroidered Cropped Wide Leg Jeans', 'worksheet',
-      'Denim', 'Mid Blue', 'Mid blue wash', '1690', '369.99',
-      '178.50', '44.5%', 'Shi Shi Jiade Garments Production Co Ltd',
-      '', ''
-    );
-    console.log('Seeded style PL425');
-  }
+  // No longer auto-seeds a demo style when the table is empty - that was
+  // fine for a brand-new dev install, but this app is in real production
+  // use now, and an empty styles table is a legitimate, intentional state
+  // (see scripts/reset-concepts-and-styles.js / the Settings > Danger Zone
+  // reset action) that shouldn't get a surprise demo row injected back in.
 }
 
 seed();

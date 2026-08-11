@@ -86,7 +86,8 @@ function renderDangerZoneTab(){
       <div class="danger-zone-box">
         <h3>Done</h3>
         <p>Every concept, style and order has been deleted (${d.done.filesDeleted} files and ${d.done.foldersDeleted} folders cleaned up on disk). Users, contacts, factories, fabrics, spec categories, size ranges and containers are untouched.</p>
-        <button class="btn btn-ghost" onclick="goto('styles')">Go to Styles</button>
+        <p class="hint">The app needs a full reload to clear everything it already had cached in memory (styles, concepts, the Shipping board) - click below rather than navigating normally, or you'll still see stale cards.</p>
+        <button class="btn btn-primary" onclick="window.location.reload()">Reload the app</button>
       </div>`;
   }
 
