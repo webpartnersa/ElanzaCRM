@@ -467,6 +467,12 @@ footer.drawer-actions { padding:16px 24px; border-top:1px solid var(--line); bac
 .submission-slot-actions { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
 .submission-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:8px; border-top:1px solid var(--line-soft); }
 
+/* ---- Settings: Danger Zone ---- */
+.danger-zone-box { max-width:560px; padding:18px 20px; border:1px solid var(--stitch-red); border-radius:var(--radius); background:#FBF2F2; }
+.danger-zone-box h3 { margin:0 0 8px 0; color:var(--stitch-red); }
+.danger-zone-counts { margin:12px 0; padding:10px 14px; background:var(--paper-raised); border:1px solid var(--line); border-radius:var(--radius); max-height:220px; overflow-y:auto; }
+.danger-zone-count { display:flex; justify-content:space-between; font-size:12.5px; padding:3px 0; font-family:monospace; }
+
 /* ---- Fabrics ---- */
 .fabric-status { font-size:11px; font-weight:600; padding:3px 9px; border-radius:9px; }
 .fabric-status-ok { background:#E6EEE9; color:var(--confirmed); }

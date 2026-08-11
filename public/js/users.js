@@ -12,17 +12,99 @@ function renderSettingsView(){
     <div class="tabs">
       ${isAdmin ? `<button class="tab ${tab==='users'?'active':''}" onclick="setSettingsTab('users')">Users &amp; Permissions</button>` : ''}
       <button class="tab ${tab==='password'?'active':''}" onclick="setSettingsTab('password')">Password</button>
+      ${isAdmin ? `<button class="tab ${tab==='danger'?'active':''}" onclick="setSettingsTab('danger')">Danger Zone</button>` : ''}
     </div>
     <div style="margin-top:20px;">
       ${isAdmin && tab==='users' ? renderUsersTab() : ''}
       ${tab==='password' ? renderPasswordTab() : ''}
+      ${isAdmin && tab==='danger' ? renderDangerZoneTab() : ''}
     </div>`;
 }
 
 function setSettingsTab(tab){
   state.settingsTab = tab;
   if (tab === 'users' && !state.users.length) loadUsers();
+  else if (tab === 'danger') loadResetPreview();
   else render();
+}
+
+// ---- Danger Zone: wipes concepts/styles/orders (and everything that
+// hangs off them) for a fresh start - see lib/resetConceptsAndStyles.js for
+// exact scope. Requires typing the exact phrase, not just a click, so this
+// can't be triggered by a stray double-click or muscle memory.
+const DANGER_PHRASE = 'DELETE ALL';
+
+async function loadResetPreview(){
+  state.dangerZone = { loading: true, counts: null, phrase: '', busy: false, done: null, error: '' };
+  render();
+  try {
+    const { counts } = await api('/api/admin/reset-preview');
+    state.dangerZone = { loading: false, counts, phrase: '', busy: false, done: null, error: '' };
+  } catch(e) {
+    state.dangerZone = { loading: false, counts: null, phrase: '', busy: false, done: null, error: e.message };
+  }
+  render();
+}
+
+function setDangerPhrase(v){
+  state.dangerZone.phrase = v;
+  render();
+  const el = document.getElementById('danger-phrase-input');
+  if (el) {
+    el.focus();
+    const len = el.value.length;
+    el.setSelectionRange(len, len);
+  }
+}
+
+async function runReset(){
+  const d = state.dangerZone;
+  if (!d || d.phrase !== DANGER_PHRASE) return;
+  if (!confirm('This permanently deletes every concept, style and order. This cannot be undone from within the app. Continue?')) return;
+  d.busy = true; d.error = '';
+  render();
+  try {
+    const result = await api('/api/admin/reset', { method:'POST', body: JSON.stringify({ confirmPhrase: d.phrase }) });
+    d.busy = false;
+    d.done = result;
+    render();
+    toast('CRM reset - concepts, styles and orders cleared');
+  } catch(e) {
+    d.busy = false;
+    d.error = e.message;
+    render();
+  }
+}
+
+function renderDangerZoneTab(){
+  const d = state.dangerZone;
+  if (!d || d.loading) return `<p class="hint">Loading...</p>`;
+  if (d.error && !d.counts) return `<p class="hint" style="color:var(--stitch-red);">${d.error}</p>`;
+
+  if (d.done) {
+    return `
+      <div class="danger-zone-box">
+        <h3>Done</h3>
+        <p>Every concept, style and order has been deleted (${d.done.filesDeleted} files and ${d.done.foldersDeleted} folders cleaned up on disk). Users, contacts, factories, fabrics, spec categories, size ranges and containers are untouched.</p>
+        <button class="btn btn-ghost" onclick="goto('styles')">Go to Styles</button>
+      </div>`;
+  }
+
+  const counts = d.counts || {};
+  const rows = Object.entries(counts).map(([table, n]) => `<div class="danger-zone-count"><span>${table}</span><span>${n}</span></div>`).join('');
+
+  return `
+    <div class="danger-zone-box">
+      <h3>Reset concepts, styles &amp; orders</h3>
+      <p class="hint">Permanently deletes every concept and style - along with their photos, comments, factory-cost requests, spec/fit records, and every order currently in the Shipping Schedule. Users, contacts, factories, fabrics (and their lab test reports), spec categories, size ranges, and containers are kept untouched.</p>
+      <div class="danger-zone-counts">${rows}</div>
+      <p class="hint" style="margin-top:10px;">This cannot be undone from within the app. Type <strong>${DANGER_PHRASE}</strong> below to enable the button.</p>
+      <div class="field" style="max-width:280px;">
+        <input id="danger-phrase-input" value="${d.phrase}" oninput="setDangerPhrase(this.value)" placeholder="${DANGER_PHRASE}"/>
+      </div>
+      ${d.error ? `<p class="hint" style="color:var(--stitch-red);">${d.error}</p>` : ''}
+      <button class="btn btn-danger" ${(d.phrase===DANGER_PHRASE && !d.busy) ? '' : 'disabled'} onclick="runReset()">${d.busy ? 'Deleting...' : 'Permanently delete'}</button>
+    </div>`;
 }
 
 function renderUsersTab(){
