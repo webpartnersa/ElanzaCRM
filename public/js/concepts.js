@@ -105,11 +105,11 @@ async function openConcept(id){
   // can't be lazy-loaded on tab click without a special case there.
   // .catch() degrades gracefully for buyers (403'd, tab isn't shown to them
   // anyway - see canEdit gating in renderConceptDrawerBody).
-  const [{ concept, photos, conversions }, requestsRes] = await Promise.all([
+  const [{ concept, photos, conversions, fabrics }, requestsRes] = await Promise.all([
     api('/api/concepts/'+id),
     api('/api/concepts/'+id+'/requests').catch(() => ({ requests: [] })),
   ]);
-  state.conceptDrawer = { concept, photos, conversions, requests: requestsRes.requests || [], isNew:false, lightboxIndex:null, tab:'details', specCategoryId: concept.spec_category_id || null, floatPhotoId: null };
+  state.conceptDrawer = { concept, photos, conversions, requests: requestsRes.requests || [], isNew:false, lightboxIndex:null, tab:'details', specCategoryId: concept.spec_category_id || null, floatPhotoId: null, extraFabrics: fabrics || [] };
   render();
 }
 // Nothing is created in the database until Save is clicked - the concept
@@ -120,7 +120,7 @@ async function openConcept(id){
 // needed) so they can be shown as real thumbnails before upload, and
 // uploaded for real only after the concept exists.
 function openNewConcept(){
-  state.conceptDrawer = { concept: blankConceptDraft(), photos: [], conversions: [], isNew:true, pendingFiles:[], lightboxIndex:null, tab:'details', specCategoryId: null, floatPendingIndex: 0 };
+  state.conceptDrawer = { concept: blankConceptDraft(), photos: [], conversions: [], isNew:true, pendingFiles:[], lightboxIndex:null, tab:'details', specCategoryId: null, floatPendingIndex: 0, extraFabrics: [] };
   render();
 }
 // DOM-only tab switch, same fix as the Style drawer's setDrawerTab - both
@@ -760,6 +760,88 @@ function onConceptFabricPicked(code){
     d.concept.composition = fab.composition || '';
     d.concept.weight = fab.weight || '';
   }
+  if ((d.extraFabrics||[]).length) recomputeCombinedComposition();
+  patchConceptDrawerBody();
+}
+
+// A multi-piece concept (e.g. a dungaree + t-shirt set) needs more than one
+// fabric, each on its own piece - these are the "+ Add Fabric" slots beyond
+// the concept's own primary fabric_code/composition. Combined Composition
+// is rebuilt from scratch on every relevant change (same "auto insert,
+// then it's just text" trade-off the single-fabric autofill already makes)
+// by pulling each slot's composition fresh from state.fabrics rather than
+// from the concept's own (possibly already-combined) Composition field, to
+// avoid nesting an old combined string inside a new one.
+function recomputeCombinedComposition(){
+  const d = state.conceptDrawer;
+  const extraFabrics = d.extraFabrics || [];
+  const parts = [];
+  const primaryFab = (state.fabrics||[]).find(f=>f.code===d.concept.fabric_code);
+  if (primaryFab && primaryFab.composition) {
+    // Once the last extra fabric is removed, the prefix is meaningless
+    // again (that field disappears from the form) - drop it from the text
+    // even if fabric_prefix still has a leftover value sitting in state.
+    const prefix = extraFabrics.length ? (d.concept.fabric_prefix||'').trim() : '';
+    parts.push(prefix ? `${prefix}: ${primaryFab.composition}` : primaryFab.composition);
+  }
+  extraFabrics.forEach(ef => {
+    if (ef.composition) {
+      const prefix = (ef.prefix||'').trim();
+      parts.push(prefix ? `${prefix}: ${ef.composition}` : ef.composition);
+    }
+  });
+  d.concept.composition = parts.join(' / ');
+}
+
+// Keeps any prefixes already typed into other fabric-slot rows from being
+// lost when patchConceptDrawerBody() replaces the whole body's innerHTML -
+// same reasoning as syncConceptDraftFromDom() for the rest of the form.
+function syncExtraFabricsFromDom(){
+  (state.conceptDrawer.extraFabrics||[]).forEach((ef,i) => {
+    const el = document.getElementById('ef-prefix-'+i);
+    if (el) ef.prefix = el.value;
+  });
+}
+
+function onConceptFabricPrefixChanged(){
+  syncConceptDraftFromDom();
+  syncExtraFabricsFromDom();
+  recomputeCombinedComposition();
+  patchConceptDrawerBody();
+}
+
+function addExtraFabric(){
+  syncConceptDraftFromDom();
+  syncExtraFabricsFromDom();
+  state.conceptDrawer.extraFabrics = [...(state.conceptDrawer.extraFabrics||[]), { prefix:'', fabric_code:'', composition:'' }];
+  recomputeCombinedComposition();
+  patchConceptDrawerBody();
+}
+
+function removeExtraFabric(i){
+  syncConceptDraftFromDom();
+  syncExtraFabricsFromDom();
+  state.conceptDrawer.extraFabrics.splice(i, 1);
+  recomputeCombinedComposition();
+  patchConceptDrawerBody();
+}
+
+function onExtraFabricPicked(i, code){
+  syncConceptDraftFromDom();
+  syncExtraFabricsFromDom();
+  const d = state.conceptDrawer;
+  const ef = d.extraFabrics[i];
+  ef.fabric_code = code;
+  const fab = (state.fabrics||[]).find(f=>f.code===code);
+  ef.composition = fab ? (fab.composition||'') : '';
+  recomputeCombinedComposition();
+  patchConceptDrawerBody();
+}
+
+function onExtraFabricPrefixChanged(i){
+  syncConceptDraftFromDom();
+  syncExtraFabricsFromDom();
+  recomputeCombinedComposition();
   patchConceptDrawerBody();
 }
 
@@ -771,7 +853,8 @@ function onConceptFabricPicked(code){
 // destroy and recreate .drawer-body and reset its scroll position back to
 // the top every time.
 function renderConceptDrawerBody(){
-  const { concept: c, photos, conversions, isNew, tab, pendingFiles } = state.conceptDrawer;
+  const { concept: c, photos, conversions, isNew, tab, pendingFiles, extraFabrics } = state.conceptDrawer;
+  const fabricSlots = extraFabrics || [];
   const canEdit = state.user.role !== 'buyer';
   const currentTab = tab || 'details';
   const deptOptions = DEPARTMENTS.map(d=>`<option value="${d}" ${c.department===d?'selected':''}>${d}</option>`).join('');
@@ -846,11 +929,27 @@ function renderConceptDrawerBody(){
       ` : ''}
       <div class="field"><label>Description</label><textarea id="cf-description" ${canEdit?'':'disabled'}>${c.description||''}</textarea></div>
       <div class="field">
-        <label>Fabric</label>
-        <select id="cf-fabric_code" onchange="onConceptFabricPicked(this.value)" ${canEdit?'':'disabled'}>
-          <option value="" ${!c.fabric_code?'selected':''}>-</option>
-          ${(state.fabrics||[]).map(f=>`<option value="${f.code}" ${c.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
-        </select>
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <label style="margin-bottom:5px;">Fabric</label>
+          ${!isNew && canEdit ? `<a href="javascript:void(0)" onclick="addExtraFabric()" style="font-size:12px; text-transform:none;">+ Add Fabric</a>` : ''}
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          ${fabricSlots.length ? `<input id="cf-fabric_prefix" placeholder="Piece (e.g. Dungaree)" value="${c.fabric_prefix||''}" onchange="onConceptFabricPrefixChanged()" style="width:140px;" ${canEdit?'':'disabled'}/>` : ''}
+          <select id="cf-fabric_code" onchange="onConceptFabricPicked(this.value)" ${canEdit?'':'disabled'} style="flex:1;">
+            <option value="" ${!c.fabric_code?'selected':''}>-</option>
+            ${(state.fabrics||[]).map(f=>`<option value="${f.code}" ${c.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
+          </select>
+        </div>
+        ${fabricSlots.map((ef,i)=>`
+          <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+            <input id="ef-prefix-${i}" placeholder="Piece (e.g. T-Shirt)" value="${ef.prefix||''}" onchange="onExtraFabricPrefixChanged(${i})" style="width:140px;" ${canEdit?'':'disabled'}/>
+            <select id="ef-fabric-${i}" onchange="onExtraFabricPicked(${i}, this.value)" ${canEdit?'':'disabled'} style="flex:1;">
+              <option value="" ${!ef.fabric_code?'selected':''}>-</option>
+              ${(state.fabrics||[]).map(f=>`<option value="${f.code}" ${ef.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
+            </select>
+            ${canEdit ? `<button type="button" class="btn btn-ghost btn-sm" onclick="removeExtraFabric(${i})" title="Remove this fabric">&times;</button>` : ''}
+          </div>
+        `).join('')}
       </div>
       <div class="row2">
         <div class="field"><label>Composition</label><input id="cf-composition" value="${c.composition||''}" ${canEdit?'':'disabled'}/></div>
@@ -1182,7 +1281,7 @@ function syncConceptDraftFromDom(){
   const d = state.conceptDrawer;
   if (!d) return;
   const fields = ['department','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
-    'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)];
+    'fabric_code','fabric_prefix','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)];
   fields.forEach(f => {
     const el = document.getElementById('cf-'+f);
     if (el) d.concept[f] = el.value;
@@ -1265,9 +1364,22 @@ async function saveConcept(){
       spec_category_id: state.conceptDrawer.specCategoryId,
     };
     ['department','concept_no','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
-     'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {
+     'fabric_code','fabric_prefix','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {
       const el = document.getElementById('cf-'+f);
       if (el) body[f] = el.value;
+    });
+    // Extra fabric slots for a multi-piece set (see "+ Add Fabric") - read
+    // straight from the DOM like every other field above, not from state,
+    // since a prefix edit only lands in state.conceptDrawer.extraFabrics on
+    // blur (onchange), and Save can be clicked before that fires.
+    body.fabrics = (state.conceptDrawer.extraFabrics||[]).map((ef, i) => {
+      const prefixEl = document.getElementById('ef-prefix-'+i);
+      const fabricEl = document.getElementById('ef-fabric-'+i);
+      return {
+        prefix: prefixEl ? prefixEl.value : (ef.prefix||''),
+        fabric_code: fabricEl ? fabricEl.value : (ef.fabric_code||''),
+        composition: ef.composition || '',
+      };
     });
     await api('/api/concepts/'+c.id, { method:'PUT', body: JSON.stringify(body) });
     toast('Saved');

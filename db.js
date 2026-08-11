@@ -172,6 +172,25 @@ CREATE TABLE IF NOT EXISTS concepts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- Extra fabric slots for a multi-piece concept (e.g. a dungaree + t-shirt
+  -- set needs two fabrics). The concept's own fabric_code/composition
+  -- columns remain the first/primary fabric - this table only holds any
+  -- fabric beyond that one, added via "+ Add Fabric" in the drawer. prefix
+  -- labels which piece a slot belongs to (e.g. "T-Shirt") so the combined
+  -- composition text can be built as "Dungaree: ... / T-Shirt: ...".
+  -- composition is snapshotted here at pick time (same as the concept's own
+  -- composition field is), so it stays editable/frozen rather than drifting
+  -- if the fabric's own test-report composition changes later.
+  CREATE TABLE IF NOT EXISTS concept_fabrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_id INTEGER NOT NULL REFERENCES concepts(id),
+    prefix TEXT,
+    fabric_code TEXT,
+    composition TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS concept_conversions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     concept_id INTEGER NOT NULL REFERENCES concepts(id),
@@ -694,6 +713,13 @@ ensureColumn('styles', 'size_range_id', 'INTEGER');
 // name on both so CONCEPT_TO_STYLE_FIELDS maps it straight across.
 ensureColumn('concepts', 'factory_cost_options', 'TEXT');
 ensureColumn('styles', 'factory_cost_options', 'TEXT');
+
+// Label for the concept's own (primary) fabric - only shown/used once a
+// concept has extra fabric slots (see concept_fabrics above) for a
+// multi-piece set, so the combined composition text can be built as
+// "Dungaree: ... / T-Shirt: ..." rather than leaving the first piece
+// unlabeled.
+ensureColumn('concepts', 'fabric_prefix', 'TEXT');
 
 // Shipping Schedule drawer fields beyond the core columns above - kept as a
 // non-destructive extension rather than baked into the initial CREATE TABLE

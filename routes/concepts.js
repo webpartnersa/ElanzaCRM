@@ -161,7 +161,8 @@ router.get('/:id', requireAuth, requirePermission('concepts'), (req, res) => {
   attachCoverPhoto(concept);
   const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
   const conversions = db.prepare('SELECT * FROM concept_conversions WHERE concept_id = ? ORDER BY created_at DESC').all(concept.id);
-  res.json({ concept: scopeConceptForRole(concept, user), photos, conversions });
+  const fabrics = db.prepare('SELECT * FROM concept_fabrics WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+  res.json({ concept: scopeConceptForRole(concept, user), photos, conversions, fabrics });
 });
 
 // ---- Create / edit / delete (buyers cannot) ----
@@ -244,7 +245,7 @@ router.put('/:id', requireAuth, (req, res) => {
   const concept = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
   if (!concept) return res.status(404).json({ error: 'Concept not found' });
 
-  const fields = ['concept_date', 'cad_description', ...CONCEPT_TEXT_FIELDS];
+  const fields = ['concept_date', 'cad_description', 'fabric_prefix', ...CONCEPT_TEXT_FIELDS];
   const updates = [];
   const values = [];
   fields.forEach(f => { if (req.body[f] !== undefined) { updates.push(`${f} = ?`); values.push(req.body[f]); } });
@@ -294,12 +295,35 @@ router.put('/:id', requireAuth, (req, res) => {
     }
   }
 
-  if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
-  values.push(req.params.id);
-  db.prepare(`UPDATE concepts SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+  // Extra fabric slots for a multi-piece set (see concept_fabrics in db.js) -
+  // sent as the full desired list each save and replaced wholesale, same
+  // "just resend everything" approach as photo reordering, simpler than
+  // per-slot CRUD for what's normally 1-2 rows.
+  const fabricsProvided = req.body.fabrics !== undefined;
+  if (fabricsProvided) {
+    const fabrics = Array.isArray(req.body.fabrics) ? req.body.fabrics : [];
+    db.prepare('DELETE FROM concept_fabrics WHERE concept_id = ?').run(concept.id);
+    const insertFabric = db.prepare('INSERT INTO concept_fabrics (concept_id, prefix, fabric_code, composition, sort_order) VALUES (?,?,?,?,?)');
+    fabrics.forEach((f, i) => {
+      insertFabric.run(
+        concept.id,
+        (f.prefix || '').toString().trim() || null,
+        (f.fabric_code || '').toString().trim() || null,
+        (f.composition || '').toString().trim() || null,
+        i
+      );
+    });
+  }
+
+  if (!updates.length && !fabricsProvided) return res.status(400).json({ error: 'No fields to update' });
+  if (updates.length) {
+    values.push(req.params.id);
+    db.prepare(`UPDATE concepts SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+  }
   const updated = db.prepare('SELECT * FROM concepts WHERE id = ?').get(req.params.id);
   attachCoverPhoto(updated);
-  res.json({ concept: scopeConceptForRole(updated, user) });
+  const fabrics = db.prepare('SELECT * FROM concept_fabrics WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+  res.json({ concept: scopeConceptForRole(updated, user), fabrics });
 });
 
 router.delete('/:id', requireAuth, (req, res) => {
@@ -314,6 +338,7 @@ router.delete('/:id', requireAuth, (req, res) => {
   });
   db.prepare('DELETE FROM concept_photos WHERE concept_id = ?').run(concept.id);
   db.prepare('DELETE FROM concept_conversions WHERE concept_id = ?').run(concept.id);
+  db.prepare('DELETE FROM concept_fabrics WHERE concept_id = ?').run(concept.id);
   db.prepare('DELETE FROM concepts WHERE id = ?').run(concept.id);
   res.json({ ok: true });
 });
