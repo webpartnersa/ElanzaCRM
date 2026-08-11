@@ -91,7 +91,7 @@ function resolveUploadPath(relPath){
 // converted to WebP (see lib/imageConvert.js) before it's ever saved.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB per file
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB per file - a single phone camera photo can exceed 5MB
   fileFilter: (req, file, cb) => {
     if (!req.session.user || req.session.user.role === 'buyer') {
       return cb(new Error('Not authorized to upload photos'));

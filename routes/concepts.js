@@ -107,9 +107,13 @@ function resolveUploadPath(relPath){
 // Kept in memory rather than written to disk as-is - every upload gets
 // converted to WebP (see lib/imageConvert.js) before it's ever saved, so
 // there's no raw file on disk to name/place until after that conversion.
+// 15MB per file - matches the rest of the app's upload limits (fabric
+// reports, fit sheets). 5MB used to be the limit here but a single modern
+// phone camera photo routinely exceeds that (mobile's "Take Photo" flow
+// in particular), which was rejecting real uploads outright.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 15 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!req.session.user || req.session.user.role === 'buyer') {
       return cb(new Error('Not authorized to upload photos'));
