@@ -253,14 +253,35 @@ router.put('/:id', requireAuth, (req, res) => {
 
   // Changing department reassigns the concept's code, since its prefix is
   // department-derived (e.g. CL -> CM) - lets an early mistake be corrected
-  // properly instead of leaving a permanently mismatched prefix. The main
-  // CAD image is named after the code, so it gets renamed to match too;
-  // reference/detail photos are named by internal id, unaffected.
+  // properly instead of leaving a permanently mismatched prefix.
+  let newConceptNo = concept.concept_no;
   if (req.body.department !== undefined && req.body.department !== concept.department) {
     if (!DEPT_CODES[req.body.department]) return res.status(400).json({ error: 'Invalid department' });
-    const newConceptNo = nextConceptNo(req.body.department);
-    updates.push('department = ?', 'concept_no = ?');
-    values.push(req.body.department, newConceptNo);
+    newConceptNo = nextConceptNo(req.body.department);
+    updates.push('department = ?');
+    values.push(req.body.department);
+  }
+
+  // A direct rename of the code itself (fixing a typo, renumbering, etc) -
+  // wins over the auto-reassigned code above if both are sent together.
+  // Case-insensitively unique since concept_no is used as a lookup key
+  // elsewhere (CAD/report filenames, request emails).
+  if (req.body.concept_no !== undefined) {
+    const requested = (req.body.concept_no || '').toString().trim().toUpperCase();
+    if (!requested) return res.status(400).json({ error: 'Concept code cannot be empty' });
+    if (requested !== concept.concept_no) {
+      const clash = db.prepare('SELECT id FROM concepts WHERE UPPER(concept_no) = ? AND id != ?').get(requested, concept.id);
+      if (clash) return res.status(400).json({ error: `Concept code ${requested} is already in use` });
+      newConceptNo = requested;
+    }
+  }
+
+  // The main CAD image is named after the code, so it gets renamed to match
+  // whenever the code actually changes (department-driven or manual) -
+  // reference/detail photos are named by internal id, unaffected.
+  if (newConceptNo !== concept.concept_no) {
+    updates.push('concept_no = ?');
+    values.push(newConceptNo);
 
     const cadPhoto = db.prepare("SELECT * FROM concept_photos WHERE concept_id = ? AND role = 'cad'").get(concept.id);
     if (cadPhoto) {

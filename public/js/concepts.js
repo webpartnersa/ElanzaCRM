@@ -838,6 +838,12 @@ function renderConceptDrawerBody(){
         <select id="cf-department" ${canEdit?'':'disabled'} onchange="onConceptDeptChange(this.value)">${deptOptions}</select>
         ${!isNew ? `<div class="hint" style="margin-top:4px;">Changing this reassigns the concept code (currently ${c.concept_no}) to match the new department.</div>` : ''}
       </div>
+      ${!isNew ? `
+        <div class="field">
+          <label>Concept Code</label>
+          <input id="cf-concept_no" value="${c.concept_no}" ${canEdit?'':'disabled'} style="text-transform:uppercase;"/>
+        </div>
+      ` : ''}
       <div class="field"><label>Description</label><textarea id="cf-description" ${canEdit?'':'disabled'}>${c.description||''}</textarea></div>
       <div class="field">
         <label>Fabric</label>
@@ -1258,7 +1264,7 @@ async function saveConcept(){
     const body = {
       spec_category_id: state.conceptDrawer.specCategoryId,
     };
-    ['department','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
+    ['department','concept_no','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
      'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {
       const el = document.getElementById('cf-'+f);
       if (el) body[f] = el.value;
