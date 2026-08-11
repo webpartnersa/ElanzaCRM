@@ -377,6 +377,11 @@ function renderFormDetailsSection(){
   const sizeOptions = (state.sizeRanges||[]).map(r => `<option value="${r.id}" ${String(c.size_range_id||'')===String(r.id)?'selected':''}>${esc(r.values.join(' / '))}</option>`).join('');
   return `
     <div class="section">
+      <div class="section-label">Description <span style="font-weight:400;text-transform:none;">(optional)</span></div>
+      <textarea class="desc-input" oninput="updateFormField('description', this.value)">${esc(c.description)}</textarea>
+    </div>
+
+    <div class="section">
       <div class="section-label">Department</div>
       <div class="field">
         <select id="mf-department" onchange="onFormDeptChange(this.value)">
@@ -432,11 +437,6 @@ function renderFormDetailsSection(){
     <div class="section">
       ${formTextareaField('packing','Packing')}
       ${formTextareaField('labels','Labels')}
-    </div>
-
-    <div class="section">
-      <div class="section-label">Description <span style="font-weight:400;text-transform:none;">(optional)</span></div>
-      <textarea class="desc-input" oninput="updateFormField('description', this.value)">${esc(c.description)}</textarea>
     </div>
 
     <div class="section">
