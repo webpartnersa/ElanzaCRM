@@ -16,15 +16,27 @@ const DELAY_ALERT_THRESHOLD = 2; // delay_count >= 2 = on at least its 3rd shipm
 
 function initNotificationsState(){
   if (!state.notificationReadKeys) state.notificationReadKeys = new Set();
+  if (!state.notificationDismissedKeys) state.notificationDismissedKeys = new Set();
+  if (!state.notifSelectedKeys) state.notifSelectedKeys = new Set();
 }
 async function loadNotificationReads(){
   initNotificationsState();
-  const { keys } = await api('/api/notifications/reads');
+  const { keys, dismissedKeys } = await api('/api/notifications/reads');
   state.notificationReadKeys = new Set(keys);
+  state.notificationDismissedKeys = new Set(dismissedKeys);
   render();
 }
 function isNotifRead(key){
   return state.notificationReadKeys ? state.notificationReadKeys.has(key) : false;
+}
+function isNotifDismissed(key){
+  return state.notificationDismissedKeys ? state.notificationDismissedKeys.has(key) : false;
+}
+// The selection column each notification row starts with - stops the click
+// from also bubbling to the row's own "open this" handler.
+function notifCheckbox(key){
+  const checked = state.notifSelectedKeys && state.notifSelectedKeys.has(key);
+  return `<input type="checkbox" class="notif-select" ${checked?'checked':''} onclick="event.stopPropagation(); toggleNotifSelected('${key}')"/>`;
 }
 // Optimistic - marks locally first so the UI updates immediately, then
 // persists. A failed save just means it reverts to unread on next reload,
@@ -40,11 +52,39 @@ async function markNotificationsRead(keys){
   } catch(e) { toast('Could not save read status: ' + e.message); }
 }
 
+function toggleNotifSelected(key){
+  initNotificationsState();
+  if (state.notifSelectedKeys.has(key)) state.notifSelectedKeys.delete(key);
+  else state.notifSelectedKeys.add(key);
+  render();
+}
+
+// "Delete" - see db.js's dismissed_at comment for why this marks the alert
+// dismissed rather than removing a row (2 of the 3 alert types don't have
+// one). Optimistic like markNotificationsRead above, and also drops
+// dismissed keys out of the selection set so a stale checkbox can't linger.
+async function deleteSelectedNotifications(){
+  initNotificationsState();
+  const keys = Array.from(state.notifSelectedKeys);
+  if (!keys.length) return;
+  keys.forEach(k => { state.notificationDismissedKeys.add(k); state.notifSelectedKeys.delete(k); });
+  render();
+  try {
+    await api('/api/notifications/dismiss', { method:'POST', body: JSON.stringify({ keys }) });
+    toast(`${keys.length} notification${keys.length===1?'':'s'} deleted`);
+  } catch(e) {
+    keys.forEach(k => state.notificationDismissedKeys.delete(k));
+    render();
+    toast('Could not delete: ' + e.message);
+  }
+}
+
 function collectDelayAlerts(){
   if (!state.shipping) return [];
   return shippingGroups()
     .flatMap(g => g.orders.map(o => ({ order: o, group: g, key: `delay:${o.id}:${o.delay_count}` })))
     .filter(({order}) => (order.delay_count||0) >= DELAY_ALERT_THRESHOLD)
+    .filter(({key}) => !isNotifDismissed(key))
     .sort((a,b) => (b.order.delay_count||0) - (a.order.delay_count||0));
 }
 
@@ -59,6 +99,7 @@ function collectFabricAlerts(){
   return state.fabricReports
     .map(r => ({ report: r, status: fabricStatus({ approval_date: r.report_date }), key: `report:${r.id}:${r.report_date||'none'}` }))
     .filter(({status}) => status.cls==='fabric-status-warn' || status.cls==='fabric-status-expired')
+    .filter(({key}) => !isNotifDismissed(key))
     .sort((a,b) => {
       const da = fabricExpiry({ approval_date: a.report.report_date });
       const db = fabricExpiry({ approval_date: b.report.report_date });
@@ -73,7 +114,9 @@ function collectFabricAlerts(){
 // on), so the key is just the flag's own id, not a value snapshot.
 function collectInconsistencyAlerts(){
   if (!state.fabricReportFlags) return [];
-  return state.fabricReportFlags.map(f => ({ flag: f, key: `fabricflag:${f.id}` }));
+  return state.fabricReportFlags
+    .map(f => ({ flag: f, key: `fabricflag:${f.id}` }))
+    .filter(({key}) => !isNotifDismissed(key));
 }
 
 function collectUnreadNotificationCount(){
@@ -99,10 +142,14 @@ function renderNotificationsView(){
   const inconsistencyAlerts = collectInconsistencyAlerts();
   const total = delayAlerts.length + fabricAlerts.length + inconsistencyAlerts.length;
   const unread = collectUnreadNotificationCount();
+  const selectedCount = state.notifSelectedKeys.size;
   return `
     <div class="topbar">
       <div><h1 class="display">Notifications</h1><p>${total} item${total===1?'':'s'} need${total===1?'s':''} attention${unread?`, ${unread} unread`:''}</p></div>
-      ${unread ? `<div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="markAllNotificationsRead()">Mark all as read</button></div>` : ''}
+      <div class="row-actions">
+        ${selectedCount ? `<button class="btn btn-danger btn-sm" onclick="deleteSelectedNotifications()">Delete selected (${selectedCount})</button>` : ''}
+        ${unread ? `<button class="btn btn-ghost btn-sm" onclick="markAllNotificationsRead()">Mark all as read</button>` : ''}
+      </div>
     </div>
     ${!delayAlerts.length ? `
       <div class="empty-state">No delayed orders right now - everything's still on its original or first-revised shipment date.</div>
@@ -113,6 +160,7 @@ function renderNotificationsView(){
           const unread = !isNotifRead(key);
           return `
           <div class="style-row ${unread?'notif-unread':''}" onclick="viewDelayedOrder('${o.id}','${key}')">
+            ${notifCheckbox(key)}
             <div>
               <div class="style-name">${unread?'<span class="notif-dot" title="Unread"></span>':''}${o.style_no||'(no style number)'} <span class="delay-badge ${delayBadgeClass(o.delay_count)}">${o.delay_count}</span></div>
               <div class="style-meta">${o.description||''} &middot; ${g.id==='pool'?'Unassigned':(g.code||g.container_no)} &middot; Shipment: ${o.po_delivery_date?formatShipDateFull(o.po_delivery_date):'not set'}</div>
@@ -131,6 +179,7 @@ function renderNotificationsView(){
           const unread = !isNotifRead(key);
           return `
           <div class="style-row ${unread?'notif-unread':''}" onclick="viewReportRenewalAlert(${r.id},'${key}')">
+            ${notifCheckbox(key)}
             <div>
               <div class="style-name">${unread?'<span class="notif-dot" title="Unread"></span>':''}${r.fabric_code} <span class="fabric-status ${status.cls}">${status.label}</span></div>
               <div class="style-meta">${r.report_number?'Report '+r.report_number:''}${r.style_no?' &middot; '+r.style_no:''}${r.composition?' &middot; '+r.composition:''}</div>
@@ -158,6 +207,7 @@ function renderNotificationsView(){
             : '';
           return `
           <div class="style-row ${unread?'notif-unread':''}" onclick="viewInconsistencyAlert('${flag.fabric_code}','${key}')">
+            ${notifCheckbox(key)}
             <div>
               <div class="style-name">${unread?'<span class="notif-dot" title="Unread"></span>':''}${flag.fabric_code}</div>
               <div class="style-meta">${flag.message} &middot; ${formatShipDateShort(flag.created_at.slice(0,10))}</div>

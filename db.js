@@ -795,6 +795,16 @@ db.exec(`
     UNIQUE(user_id, notif_key)
   );
 `);
+// "Delete" for the Notification Centre - same per-user, same-key scheme as
+// read_at above (see its comment: the key already bakes in the alert's
+// current value, so a dismissed delay/renewal naturally reappears if it
+// gets worse again - a fresh delay_count or approval_date is a different
+// key). Alerts computed live from orders/fabrics have no row of their own
+// to delete, so dismissal is the only "delete" that makes sense for those;
+// fabric_report_flags rows (the one real stored alert type) are left in
+// place too rather than actually deleted, so this stays one uniform
+// mechanism for all three alert types instead of two different ones.
+ensureColumn('notification_reads', 'dismissed_at', 'TEXT');
 
 // Per-user section access (comma-separated: styles,concepts,shipping,
 // contacts) - independent of role. Role still governs field-level scoping
