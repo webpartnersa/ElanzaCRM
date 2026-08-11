@@ -313,6 +313,22 @@ router.post('/:id/photos', requireAuth, upload.array('photos', 10), async (req, 
   }
   db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
   const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
+
+  // Mobile's "create" flow uploads photos as a second, backgrounded step
+  // (see POST '/' above) so the merchandiser isn't stuck waiting on image
+  // processing before moving to the next concept - it asks for the same
+  // auto-CAD trigger here, once the photos it just uploaded have actually
+  // landed. Not fired for ordinary photo top-ups on an existing concept,
+  // which already has its own manual "Generate/Regenerate AI" button.
+  if (req.body.autoCad === '1' && openaiClient) {
+    const usablePhotos = photos.filter(p => OPENAI_IMAGE_EXT.includes(path.extname(p.path).toLowerCase()));
+    if (usablePhotos.length) {
+      generateConceptCadFromPhotos(concept, usablePhotos).catch(e => {
+        console.error(`Auto CAD generation failed for ${concept.concept_no}:`, e.message);
+      });
+    }
+  }
+
   res.json({ photos });
 });
 

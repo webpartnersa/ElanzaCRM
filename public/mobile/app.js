@@ -879,19 +879,28 @@ async function submitForm(){
       const formData = new FormData();
       Object.keys(f.concept).forEach(k => formData.append(k, f.concept[k] || ''));
       formData.append('spec_category_id', f.specCategoryId || '');
-      f.pendingFiles.forEach(p => formData.append('photos', p.file, p.file.name || 'photo.jpg'));
 
       const res = await fetch('/api/concepts', { method: 'POST', body: formData });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not create the concept');
 
-      f.pendingFiles.forEach(p => URL.revokeObjectURL(p.previewUrl));
-      state.lastCreated = { concept_no: data.concept.concept_no, department: data.concept.department };
+      const conceptId = data.concept.id;
+      const conceptNo = data.concept.concept_no;
+      const pending = f.pendingFiles;
+
+      state.lastCreated = { concept_no: conceptNo, department: data.concept.department };
       state.concepts = []; // browse cache is now stale
       state.form = null;
       pushScreen('success');
       state.screen = 'success';
       render();
+
+      // The concept itself is already saved at this point - upload its
+      // photos in the background rather than making the merchandiser wait
+      // ~10s for image processing before they can start the next concept.
+      // autoCad=1 chains the same AI CAD generation the old create-time
+      // flow fired, now triggered once these photos have actually landed.
+      uploadPendingPhotosInBackground(conceptId, conceptNo, pending);
     } catch(e) {
       f.submitting = false;
       f.error = e.message || 'Could not reach the server';
@@ -915,6 +924,31 @@ async function submitForm(){
       f.error = e.message || 'Could not reach the server';
       render();
     }
+  }
+}
+
+// Fire-and-forget upload used right after a mobile "create" - the concept
+// already exists, so a failure here just leaves it with no/partial photos
+// rather than losing the whole concept. Surfaced via a toast since the
+// merchandiser has typically already moved on to the next concept by the
+// time this resolves; they can reopen it from Browse to add photos again.
+async function uploadPendingPhotosInBackground(conceptId, conceptNo, pending){
+  if (!pending.length) return;
+  try {
+    const photoData = new FormData();
+    pending.forEach(p => photoData.append('photos', p.file, p.file.name || 'photo.jpg'));
+    photoData.append('autoCad', '1');
+    const res = await fetch(`/api/concepts/${conceptId}/photos`, { method: 'POST', body: photoData });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Photo upload failed');
+    }
+    if (state.form && state.form.id === conceptId) loadEditForm(conceptId);
+    if (state.conceptDetail && state.conceptDetail.concept.id === conceptId) loadConceptDetail(conceptId);
+  } catch(e) {
+    showToast(`${conceptNo}: photo upload failed - reopen it from Browse to retry`);
+  } finally {
+    pending.forEach(p => URL.revokeObjectURL(p.previewUrl));
   }
 }
 
