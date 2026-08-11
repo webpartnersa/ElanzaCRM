@@ -666,9 +666,10 @@ function renderStyleCadTab(s, photos, canEdit){
 
 // Wash Care tab - a single label image (role='washcare', same one-photo-by-
 // role convention as the CAD tab's role='cad' above) plus free-text notes.
-// No AI generation or PDF export here, just upload/replace/remove - the
-// label is a photo of the real printed/woven care label, not something to
-// generate.
+// Can be generated from data already on file (see generateStyleWashcareLabel
+// and lib/washcareLabelExport.js) or uploaded as a real printed/woven label
+// photo - either way it lands in the same photos row, so nothing downstream
+// needs to know which one happened.
 function renderWashcareTab(s, photos, canEdit){
   const washcarePhoto = (photos||[]).find(p=>p.role==='washcare');
   return `<div class="${tabClass('washcare')}" data-tab="washcare">
@@ -682,13 +683,19 @@ function renderWashcareTab(s, photos, canEdit){
     ${canEdit ? `
       <input type="file" id="style-washcare-input" accept="image/*" style="display:none;" onchange="uploadStyleWashcarePhoto()"/>
       <div class="row-actions" style="margin-top:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="generateStyleWashcareLabel()">${washcarePhoto ? 'Regenerate' : 'Generate'} label</button>
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('style-washcare-input').click()">${washcarePhoto ? 'Replace' : '+ Upload'} label</button>
       </div>
+      <div class="hint" style="margin-top:6px;">Generate builds the label from composition, wash care details, art no, season and the factory's country/importer code below - fill those in first for a complete label.</div>
     ` : ''}
 
     <div class="field" style="margin-top:20px;">
       <label>Wash care details</label>
       <textarea id="f-washcare_details" rows="7" ${canEdit?'':'disabled'} placeholder="e.g. Machine wash cold, gentle cycle&#10;Do not bleach&#10;Tumble dry low&#10;Iron on low heat, do not iron print">${s.washcare_details||''}</textarea>
+    </div>
+    <div class="field" style="margin-top:14px;">
+      <label>Art. No (from the PO)</label>
+      <input id="f-art_no" value="${(s.art_no||'').replace(/"/g,'&quot;')}" ${canEdit?'':'disabled'}/>
     </div>
   </div>`;
 }
@@ -1161,6 +1168,21 @@ async function uploadStyleWashcarePhoto(){
   } catch(e) { toast(e.message); }
 }
 
+// Builds the label from whatever's already on the style/fabric/factory
+// (composition, wash care details, art no, season, factory country +
+// importer/vendor code) - see lib/washcareLabelExport.js. Saves as the same
+// role='washcare' photo a manual upload would produce, so it's a straight
+// swap-in either way.
+async function generateStyleWashcareLabel(){
+  const s = state.drawer.style;
+  try {
+    const data = await api('/api/styles/'+s.id+'/generate-washcare-label', { method:'POST' });
+    state.drawer.photos = data.photos;
+    renderDrawerOnly();
+    toast('Wash care label generated');
+  } catch(e) { toast('Could not generate: ' + e.message); }
+}
+
 async function deleteStyleWashcarePhoto(styleId, photoId){
   if (!confirm('Remove the wash care label image?')) return;
   try {
@@ -1330,7 +1352,7 @@ const EDITABLE_FIELDS = [
   'style_no','buyer','description','units',
   'fabric_code','composition','weight','wash','colour','print','embroidery_applique',
   'topstitch','trims','styling','size_range_id','packing','labels','source','tags','concept_date',
-  'factory','shipping_date','dc_date','cad_description','washcare_details',
+  'factory','shipping_date','dc_date','cad_description','washcare_details','art_no',
   'cost_estimate','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options'
 ];
 

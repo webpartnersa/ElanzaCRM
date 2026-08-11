@@ -2,6 +2,7 @@ node_modules/
 .env
 .env.*
 uploads/
+private/
 docket-portal.db
 docket-portal.db-shm
 docket-portal.db-wal
@@ -12,3 +13,4 @@ docket-portal.db-wal
 docket-portal.db.bak-*
 fabric-reports/
 worksheet-po/
+public/final-submission/

@@ -53,7 +53,7 @@ function renderFactoriesView(){
 }
 
 function blankFactoryDraft(){
-  return { id:null, name:'', registered_name:'', address:'', certifications:'' };
+  return { id:null, name:'', registered_name:'', address:'', certifications:'', country:'', importer_vendor_code:'' };
 }
 
 function openNewFactory(){
@@ -93,6 +93,8 @@ function renderFactoryDrawerHost(){
         <div class="field"><label>Factory name (for our reference)</label><input id="fc-name" value="${(f.name||'').replace(/"/g,'&quot;')}" placeholder="e.g. CK Factory"/></div>
         <div class="field"><label>Garment Factory (real registered name)</label><input id="fc-registered_name" value="${(f.registered_name||'').replace(/"/g,'&quot;')}" placeholder="e.g. CK Benke Clothing (Pty) Ltd"/></div>
         <div class="field"><label>Address</label><textarea id="fc-address">${f.address||''}</textarea></div>
+        <div class="field"><label>Country</label><input id="fc-country" value="${(f.country||'').replace(/"/g,'&quot;')}" placeholder="e.g. China"/></div>
+        <div class="field"><label>Importer/Vendor code</label><input id="fc-importer_vendor_code" value="${(f.importer_vendor_code||'').replace(/"/g,'&quot;')}" placeholder="e.g. CU25179051"/></div>
         <div class="field"><label>Certifications</label><textarea id="fc-certifications" placeholder="e.g. BSCI, WRAP, SEDEX">${f.certifications||''}</textarea></div>
       </div>
       <footer class="drawer-actions">
@@ -167,6 +169,8 @@ async function saveFactory(){
     name,
     registered_name: document.getElementById('fc-registered_name').value.trim(),
     address: document.getElementById('fc-address').value.trim(),
+    country: document.getElementById('fc-country').value.trim(),
+    importer_vendor_code: document.getElementById('fc-importer_vendor_code').value.trim(),
     certifications: document.getElementById('fc-certifications').value.trim(),
   };
   try {

@@ -27,6 +27,7 @@ app.use('/api/requests', require('./routes/requests'));
 app.use('/api/spec-categories', require('./routes/specCategories'));
 app.use('/api/size-ranges', require('./routes/sizeRanges'));
 app.use('/api/shipping', require('./routes/shipping'));
+app.use('/api/shipping', require('./routes/finalSubmission'));
 app.use('/api/contacts', require('./routes/contacts'));
 app.use('/api/factories', require('./routes/factories'));
 app.use('/api/fabrics', require('./routes/fabrics'));

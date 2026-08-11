@@ -579,8 +579,9 @@ function onShippingDropOnGroup(e, groupId){
 function openShippingDrawer(orderId, tab){
   const found = findShippingOrder(orderId);
   if (!found) return;
-  state.shippingDrawer = { orderId, tab: tab || 'product', title: found.order.style_no + ' - ' + found.group.container_no };
+  state.shippingDrawer = { orderId, tab: tab || 'product', title: found.order.style_no + ' - ' + found.group.container_no, submission: null };
   render();
+  loadOrderSubmission(orderId);
 }
 function closeShippingDrawer(){ state.shippingDrawer = null; render(); }
 function setShippingDrawerTab(tab){ state.shippingDrawer.tab = tab; render(); }
@@ -659,6 +660,7 @@ function renderShippingDrawerHost(){
         <button class="tab ${currentTab==='costing'?'active':''}" onclick="setShippingDrawerTab('costing')">Costing</button>
         <button class="tab ${currentTab==='invoicing'?'active':''}" onclick="setShippingDrawerTab('invoicing')">Invoicing</button>
         <button class="tab ${currentTab==='delays'?'active':''}" onclick="setShippingDrawerTab('delays')">Delays${o.delay_count?' ('+o.delay_count+')':''}</button>
+        <button class="tab ${currentTab==='submission'?'active':''}" onclick="setShippingDrawerTab('submission')">Final Submission${submissionTabBadge(o)}</button>
       </div>
       <div class="drawer-body">
         ${currentTab==='product' ? `
@@ -716,12 +718,142 @@ function renderShippingDrawerHost(){
           <div class="row2">${field('elanza_paid','Elanza inv paid date')}${field('liverpool_payment_date','Liverpool payment date to us')}</div>
         ` : ''}
         ${currentTab==='delays' ? renderShippingDelaysTab(o) : ''}
+        ${currentTab==='submission' ? renderSubmissionTab(o) : ''}
       </div>
       <footer class="drawer-actions">
         <button class="btn btn-danger" style="margin-right:auto;" onclick="removeShippingOrder('${o.id}')">Remove</button>
         <button class="btn btn-primary" onclick="saveShippingDrawer()">Save changes</button>
       </footer>
     </div>`;
+}
+
+// ---- Final Submission: the fixed bundle of documents PnP requires per
+// order before bulk can ship (see routes/finalSubmission.js and
+// lib/finalSubmissionDocTypes.js for the canonical 8-slot list) - some
+// slots are generated from data already in the CRM, some are plain
+// uploads, and fabric_test_report auto-links to whatever's already on file
+// in Fabrics for this order's fabric code. Loaded lazily (not part of the
+// order object itself) since it's its own set of DB rows/files, fetched
+// fresh each time the drawer opens so it can't go stale across sessions.
+async function loadOrderSubmission(orderId){
+  try {
+    const data = await api('/api/shipping/orders/'+orderId+'/submission');
+    if (!state.shippingDrawer || state.shippingDrawer.orderId !== orderId) return;
+    state.shippingDrawer.submission = data;
+    render();
+  } catch(e) { /* drawer may have closed before this resolved - nothing to show */ }
+}
+
+function submissionTabBadge(o){
+  const sub = state.shippingDrawer && state.shippingDrawer.submission;
+  if (!sub) return '';
+  const filledCount = sub.slots.filter(s=>s.filled).length;
+  if (sub.status === 'sent') return ' <span class="submission-badge submission-badge-sent">Sent</span>';
+  if (sub.status === 'ready') return ' <span class="submission-badge submission-badge-ready">Ready</span>';
+  return ` (${filledCount}/${sub.slots.length})`;
+}
+
+const SUBMISSION_FILE_ACCEPT = '.pdf,.xlsx,.xls,.png,.jpg,.jpeg';
+
+function renderSubmissionTab(o){
+  const sub = state.shippingDrawer.submission;
+  if (!sub) return `<p class="hint">Loading...</p>`;
+  const allRequiredFilled = sub.slots.filter(s=>!s.optional).every(s=>s.filled);
+
+  return `
+    <p class="hint" style="margin-bottom:14px;">The fixed set of documents PnP requires before this order can ship bulk. Generate what the CRM already has the data for, upload the rest, then download everything as one zip for the buyer.</p>
+    <div class="submission-slots">
+      ${sub.slots.map(s=>renderSubmissionSlot(o, s)).join('')}
+    </div>
+    <div class="submission-actions">
+      <button class="btn" onclick="downloadSubmissionZip('${o.id}')">Download ZIP</button>
+      <button class="btn" onclick="emailSubmission('${o.id}')">Email me this submission</button>
+      ${sub.status !== 'ready' && sub.status !== 'sent' ? `
+        <button class="btn btn-primary" ${allRequiredFilled?'':'disabled title="All required documents must be filled first"'} onclick="setSubmissionStatus('${o.id}','ready')">Mark order as Final</button>
+      ` : ''}
+      ${sub.status === 'ready' ? `<button class="btn btn-primary" onclick="setSubmissionStatus('${o.id}','sent')">Mark as Sent</button>` : ''}
+      ${sub.status ? `<button class="btn btn-sm btn-ghost" onclick="setSubmissionStatus('${o.id}','')">Reset status</button>` : ''}
+    </div>
+  `;
+}
+
+function renderSubmissionSlot(o, s){
+  const inputId = `sub-file-${s.key}`;
+  return `
+    <div class="submission-slot ${s.filled?'filled':''}">
+      <div class="submission-slot-main">
+        <span class="submission-slot-icon">${s.filled ? '✓' : (s.optional ? '–' : '○')}</span>
+        <div class="submission-slot-info">
+          <div class="submission-slot-label">${s.label}${s.optional?' <span class="hint">(optional)</span>':''}</div>
+          ${s.filled ? `<div class="submission-slot-meta">${s.original_filename||''}${s.source_actual==='linked'?' · linked from Fabrics':''}${s.uploaded_by?' · by '+s.uploaded_by:''}</div>` : `<div class="submission-slot-meta hint">Not on file yet</div>`}
+        </div>
+      </div>
+      <div class="submission-slot-actions">
+        ${s.filled ? `<a class="btn btn-sm btn-ghost" href="/api/shipping/orders/${o.id}/submission/${s.key}/file" target="_blank">View</a>` : ''}
+        ${s.source === 'generate' ? `<button class="btn btn-sm btn-ghost" onclick="generateSubmissionDoc('${o.id}','${s.key}')">${s.filled?'Regenerate':'Generate'}</button>` : ''}
+        <input type="file" id="${inputId}" accept="${SUBMISSION_FILE_ACCEPT}" style="display:none" onchange="uploadSubmissionDoc('${o.id}','${s.key}',this)"/>
+        <button class="btn btn-sm btn-ghost" onclick="document.getElementById('${inputId}').click()">${s.filled && s.source_actual!=='linked' ? 'Replace' : 'Upload'}</button>
+        ${s.filled && s.source_actual!=='linked' ? `<button class="btn btn-sm btn-danger" onclick="removeSubmissionDoc('${o.id}','${s.key}')">Remove</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+async function generateSubmissionDoc(orderId, docType){
+  try {
+    const data = await api('/api/shipping/orders/'+orderId+'/submission/'+docType+'/generate', { method:'POST' });
+    if (state.shippingDrawer) { state.shippingDrawer.submission = data; render(); }
+    toast('Generated');
+  } catch(e) { toast('Could not generate: ' + e.message); }
+}
+
+async function uploadSubmissionDoc(orderId, docType, inputEl){
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/shipping/orders/'+orderId+'/submission/'+docType+'/upload', { method:'POST', body: formData });
+    const data = await res.json().catch(()=>({}));
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    if (state.shippingDrawer) { state.shippingDrawer.submission = data; render(); }
+    toast('Uploaded');
+  } catch(e) { toast('Could not upload: ' + e.message); }
+  inputEl.value = '';
+}
+
+async function removeSubmissionDoc(orderId, docType){
+  if (!confirm('Remove this document from the submission bundle?')) return;
+  try {
+    const data = await api('/api/shipping/orders/'+orderId+'/submission/'+docType, { method:'DELETE' });
+    if (state.shippingDrawer) { state.shippingDrawer.submission = data; render(); }
+  } catch(e) { toast('Could not remove: ' + e.message); }
+}
+
+async function setSubmissionStatus(orderId, status){
+  try {
+    const data = await api('/api/shipping/orders/'+orderId+'/submission/status', { method:'PATCH', body: JSON.stringify({status}) });
+    if (state.shippingDrawer) { state.shippingDrawer.submission.status = data.status; render(); }
+    if (status === 'ready') toast('Order marked final - all documents ready to send');
+  } catch(e) { toast('Could not update status: ' + e.message); }
+}
+
+function downloadSubmissionZip(orderId){
+  window.open('/api/shipping/orders/'+orderId+'/submission/zip', '_blank');
+}
+
+// Sends straight to the merchandiser's own inbox (not the buyer) with the
+// zip actually attached, via the same Resend integration the costing-email
+// flow already uses - see routes/finalSubmission.js's POST .../email. Goes
+// to their own address on purpose: it's a real email they can review and
+// forward to PnP on their own schedule, rather than either firing off to
+// the buyer unreviewed or leaving them to manually re-attach a separately
+// downloaded zip to a fresh draft (the old mailto: approach).
+async function emailSubmission(orderId){
+  try {
+    const data = await api('/api/shipping/orders/'+orderId+'/submission/email', { method:'POST' });
+    toast('Sent to ' + data.sentTo + ' - forward it to the buyer whenever ready');
+  } catch(e) { toast('Could not send: ' + e.message); }
 }
 
 // ---- Shipment date delays: replaces the old "13 June was 6 June was 30

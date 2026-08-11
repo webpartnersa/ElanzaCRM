@@ -406,6 +406,29 @@ CREATE TABLE IF NOT EXISTS concepts (
     message TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- The Final Submission bundle PnP requires per order (see
+  -- routes/finalSubmission.js) - one row per doc slot, matching the fixed
+  -- list PnP's own "BULK SUBMISSION CHECKLIST" spreadsheet defines (see
+  -- DOC_TYPES there): sap_po, bulk_audit_report, graded_spec, aql_report,
+  -- fabric_test_report, sample_appraisal_report, third_party_report,
+  -- data_sheet. UNIQUE(order_id, doc_type) - re-uploading/regenerating a
+  -- slot replaces its row rather than adding a second, same reasoning as
+  -- style_spec_fits' one-row-per-stage. file_path is relative to the
+  -- private submissions dir (see resolvePrivatePath in
+  -- routes/finalSubmission.js) - never under public/ or /uploads, so it's
+  -- never web-reachable by URL guess, only through an authenticated route.
+  CREATE TABLE IF NOT EXISTS order_submission_docs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    doc_type TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'uploaded',
+    file_path TEXT NOT NULL,
+    original_filename TEXT,
+    uploaded_by TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(order_id, doc_type)
+  );
 `);
 
 // One-time backfill: auto-link every already-uploaded report to every style
@@ -422,6 +445,27 @@ CREATE TABLE IF NOT EXISTS concepts (
     styles.forEach(s => {
       if (tokens.includes((s.style_no || '').toUpperCase())) insert.run(r.id, s.id);
     });
+  });
+})();
+
+// One-time backfill: every style now gets its order row at creation time
+// (see routes/styles.js's POST '/'), not only once it reaches the 'po'
+// stage - this catches every style created before that change, so styles
+// already sitting in Brief In/Doc Sent/Costed/Worksheet In/Proceed Sent
+// show up in the Shipping Schedule immediately too, without needing to be
+// re-saved. Idempotent (only inserts where no order exists for that style
+// yet), safe to run on every startup.
+(function backfillOrdersForStyles() {
+  const styles = db.prepare('SELECT * FROM styles').all();
+  const hasOrder = db.prepare('SELECT 1 FROM orders WHERE style_id = ?');
+  const insert = db.prepare(`
+    INSERT INTO orders (style_id, style_no, description, units, rsp, season, colour, container_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+  `);
+  styles.forEach(s => {
+    if (!hasOrder.get(s.id)) {
+      insert.run(s.id, s.style_no, s.description, s.units, s.target_rsp, s.season, s.colour);
+    }
   });
 })();
 
@@ -693,6 +737,28 @@ ensureColumn('containers', 'transit_status', "TEXT DEFAULT ''");
 // Per-order DC delivery status, set from the order drawer - 'delivered' or
 // 'delayed'. Empty string = no status set.
 ensureColumn('orders', 'dc_status', "TEXT DEFAULT ''");
+// Rolls up an order's order_submission_docs rows into one status for the
+// Shipping board/drawer to badge without re-checking all 8 slots itself -
+// 'in_progress' (some slots filled), 'ready' (all 8 present, not sent yet)
+// or 'sent' (emailed to the buyer). Empty string = nothing started yet.
+// Recomputed server-side on every slot change (see routes/finalSubmission.js),
+// not user-editable directly except the explicit "mark sent" action.
+ensureColumn('orders', 'final_submission_status', "TEXT DEFAULT ''");
+// Garment Manufacturer's country on the Material Submission form - fabric
+// supplier/yarn supplier already have their own country_of_origin on
+// fabrics (see db.js's fabrics migration comment), this is the third of
+// that form's three country fields, factory-level rather than fabric-level.
+ensureColumn('factories', 'country', 'TEXT');
+// The code PnP assigns identifying who's importing/vending this factory's
+// goods (e.g. "CU25179051" on the washcare label) - factory-level like
+// country/registered_name, not per-style or per-order.
+ensureColumn('factories', 'importer_vendor_code', 'TEXT');
+// Article number as it appears on the actual PO (see lib/washcareLabelExport.js)
+// - a style-level copy alongside orders.rms_article_no rather than looked
+// up through one specific order, since a washcare label is generated per
+// style, not per order, and the article number a style's own label should
+// show doesn't need to track whichever order happens to be open.
+ensureColumn('styles', 'art_no', 'TEXT');
 
 // Read/unread tracking for the Notification Centre, per user. Notifications
 // aren't stored rows - they're computed live from orders/fabrics - so a

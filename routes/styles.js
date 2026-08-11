@@ -15,6 +15,7 @@ const { buildAppraisalWorkbook } = require('../lib/specAppraisalExport');
 const { REQUEST_TYPES, translateMessage } = require('../lib/conceptCostingTranslate');
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText } = require('../lib/conceptGenericRequestEmailHtml');
 const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
+const { buildWashcareLabelPng } = require('../lib/washcareLabelExport');
 
 const router = express.Router();
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -300,6 +301,21 @@ router.post('/', requireAuth, (req, res) => {
       VALUES (?,?,?,?,?, 'brief')
     `).run(finalStyleNo, retailer.trim(), department.trim(), (buyer||'').trim(), (description||'').trim());
     const created = db.prepare('SELECT * FROM styles WHERE id = ?').get(info.lastInsertRowid);
+
+    // A style IS an order the moment it exists - whether just converted
+    // from a concept on the buyer's verbal go-ahead, or created directly -
+    // so it lands in the Shipping Schedule's unassigned pool immediately,
+    // not only once its stage later reaches 'po' (PO Confirmed). Most
+    // fields are still blank at this point (units/rsp/season/colour get
+    // filled in via the follow-up PUT the New Style form makes right after
+    // this, same as the rest of the drawer's Details tab) - the order row
+    // isn't kept in sync with those afterward except style_no (see the PUT
+    // handler below), same as a style confirmed at 'po' always worked.
+    db.prepare(`
+      INSERT INTO orders (style_id, style_no, description, units, rsp, season, colour, container_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run(created.id, created.style_no, created.description, created.units, created.target_rsp, created.season, created.colour);
+
     attachCoverPhoto(created);
     res.json({ style: scopeStyleForRole(created, user) });
   } catch (e) {
@@ -323,7 +339,7 @@ router.put('/:id', requireAuth, (req, res) => {
     'stage', 'description', 'units', 'target_rsp',
     'fabric_code', 'composition', 'weight', 'wash', 'colour', 'print', 'embroidery_applique',
     'topstitch', 'trims', 'styling', 'packing', 'labels', 'source', 'tags', 'concept_date',
-    'shipping_date', 'dc_date', 'factory', 'concept_ref', 'cad_description', 'washcare_details',
+    'shipping_date', 'dc_date', 'factory', 'concept_ref', 'cad_description', 'washcare_details', 'art_no',
     'cost_estimate', 'buyer_rand_target', 'buyer_rsp_target', 'factory_target_price', 'factory_price', 'factory_cost_options'
   ];
   const updates = [];
@@ -366,13 +382,13 @@ router.put('/:id', requireAuth, (req, res) => {
     db.prepare('UPDATE orders SET style_no = ? WHERE style_id = ?').run(updated.style_no, updated.id);
   }
 
-  // Feeds the Shipping Schedule's unassigned pool: the moment a style is
-  // first confirmed on order ('po' = the "PO Confirmed" board stage), drop
-  // it into orders with no container yet. Only fires on the transition
-  // INTO this stage, not every save while already there, so re-saving an
-  // already-confirmed style doesn't create duplicates. If the stage later
-  // moves off 'po', the order is left as-is in Shipping Schedule rather
-  // than being silently removed - safer default, revisit if that's wrong.
+  // Safety net, not the primary trigger anymore - every style already gets
+  // its order row at creation time (see POST '/' above). This only catches
+  // the rare style that somehow still doesn't have one (e.g. a database
+  // from before that changed, or a create that failed after the style
+  // insert) by re-checking on every stage move into 'po'. If the stage
+  // later moves off 'po', the order is left as-is in Shipping Schedule
+  // rather than being silently removed - safer default, revisit if that's wrong.
   if (updated.stage === 'po' && before && before.stage !== 'po') {
     const already = db.prepare('SELECT id FROM orders WHERE style_id = ?').get(updated.id);
     if (!already) {
@@ -583,6 +599,37 @@ router.post('/:id/washcare-photo', requireAuth, upload.single('photo'), async (r
   db.prepare('UPDATE styles SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(style.id);
   const photos = db.prepare('SELECT * FROM photos WHERE style_id = ? ORDER BY id ASC').all(style.id);
   res.json({ photos });
+});
+
+// Auto-generates the wash care label from data already on the style/fabric/
+// factory (see lib/washcareLabelExport.js) and saves it exactly like a
+// manual upload would - same role='washcare' photo row, same
+// <style_no>-washcare.webp path - so everything downstream (this drawer,
+// Final Submission's washcare_label slot) treats a generated label no
+// differently from one someone uploaded by hand.
+router.post('/:id/generate-washcare-label', requireAuth, async (req, res) => {
+  const user = req.session.user;
+  if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
+  const style = db.prepare('SELECT * FROM styles WHERE id = ?').get(req.params.id);
+  if (!style) return res.status(404).json({ error: 'Not found' });
+
+  const fabric = style.fabric_code ? db.prepare('SELECT * FROM fabrics WHERE code = ?').get(style.fabric_code) : null;
+  const factory = style.factory ? db.prepare('SELECT * FROM factories WHERE name = ?').get(style.factory) : null;
+
+  try {
+    const pngBuffer = await buildWashcareLabelPng({ style, fabric, factory });
+    const filename = `${style.style_no.toLowerCase()}-washcare.webp`;
+    await convertBufferToWebpFile(pngBuffer, path.join(CAD_DIR, filename));
+
+    db.prepare("DELETE FROM photos WHERE style_id = ? AND role = 'washcare'").run(style.id);
+    db.prepare("INSERT INTO photos (style_id, path, role) VALUES (?,?,'washcare')").run(style.id, '/uploads/styles/' + filename);
+    db.prepare('UPDATE styles SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(style.id);
+    const photos = db.prepare('SELECT * FROM photos WHERE style_id = ? ORDER BY id ASC').all(style.id);
+    res.json({ photos });
+  } catch (e) {
+    console.error('Washcare label generation failed:', e.message);
+    res.status(500).json({ error: 'Generation failed: ' + e.message });
+  }
 });
 
 // Sends selected reference photos to OpenAI's image model and saves the

@@ -31,12 +31,12 @@ router.get('/:id', (req, res) => {
 });
 
 router.post('/', blockBuyerWrite, (req, res) => {
-  const { name, registered_name, address, certifications } = req.body || {};
+  const { name, registered_name, address, certifications, country, importer_vendor_code } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Factory name is required' });
   const info = db.prepare(`
-    INSERT INTO factories (name, registered_name, address, certifications)
-    VALUES (?, ?, ?, ?)
-  `).run(name.trim(), (registered_name || '').trim() || null, (address || '').trim() || null, (certifications || '').trim() || null);
+    INSERT INTO factories (name, registered_name, address, certifications, country, importer_vendor_code)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(name.trim(), (registered_name || '').trim() || null, (address || '').trim() || null, (certifications || '').trim() || null, (country || '').trim() || null, (importer_vendor_code || '').trim() || null);
   const created = db.prepare('SELECT * FROM factories WHERE id = ?').get(info.lastInsertRowid);
   res.json({ factory: created });
 });
@@ -47,7 +47,7 @@ router.put('/:id', blockBuyerWrite, (req, res) => {
   if (req.body.name !== undefined && !req.body.name.trim()) {
     return res.status(400).json({ error: 'Factory name is required' });
   }
-  const fields = ['name', 'registered_name', 'address', 'certifications'];
+  const fields = ['name', 'registered_name', 'address', 'certifications', 'country', 'importer_vendor_code'];
   const updates = [];
   const values = [];
   fields.forEach(f => { if (req.body[f] !== undefined) { updates.push(`${f} = ?`); values.push(req.body[f]); } });

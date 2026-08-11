@@ -8,6 +8,7 @@
   "dependencies": {
     "@google/genai": "^2.13.0",
     "@modelcontextprotocol/sdk": "latest",
+    "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^17.4.2",
