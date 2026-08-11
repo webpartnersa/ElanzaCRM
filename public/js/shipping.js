@@ -267,6 +267,7 @@ function renderShippingGroupBlock(g, filter){
         ${rangeHtml}
         <button class="auto-btn" onclick="autoSuggestShipping('${g.id}')">Auto-suggest</button>
         <button class="auto-btn" style="background:#e9f7ee; border-color:#b7e0c6; color:#1e7a3c;" onclick="markContainerDelivered('${g.id}')">✓ Delivered - remove</button>
+        <button class="auto-btn" style="background:#faeaea; border-color:#e3b3b3; color:#a63a3a;" onclick="deleteShippingContainer('${g.id}')" title="Created by mistake - permanently delete">Delete</button>
         ${transitStatusButtons(g)}
       </div>`;
     notesHtml = `
@@ -934,6 +935,24 @@ async function addShippingContainer(){
     render();
     toast(`${container.code} added — set its type above and drag orders in`);
   } catch(e) { toast('Could not create container: ' + e.message); }
+}
+
+// For a container that shouldn't exist at all (created by mistake) -
+// distinct from markContainerDelivered below, which is the normal
+// end-of-life flow and keeps the record for history. Any orders still in
+// it are dropped back to the unassigned pool by the backend, not deleted.
+async function deleteShippingContainer(containerId){
+  const g = findShippingGroup(containerId);
+  if (!g) return;
+  const count = g.orders.length;
+  if (!confirm(`Permanently delete ${g.container_no}? This cannot be undone.${count ? ` Its ${count} order${count===1?'':'s'} will move back to Unassigned Orders, not be deleted.` : ''}`)) return;
+  try {
+    await api('/api/shipping/containers/'+containerId, { method:'DELETE' });
+    g.orders.forEach(o => { o.container_id = null; state.shipping.unassigned.push(o); });
+    state.shipping.containers = state.shipping.containers.filter(c=>String(c.id)!==String(containerId));
+    render();
+    toast(`${g.container_no} deleted`);
+  } catch(e) { toast('Could not delete: ' + e.message); }
 }
 
 async function markContainerDelivered(containerId){

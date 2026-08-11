@@ -136,6 +136,20 @@ router.put('/containers/:id', blockBuyerWrite, (req, res) => {
   res.json({ container: updated });
 });
 
+// For a container created by mistake - unlike markContainerDelivered's
+// PUT delivered:1 (a soft hide, keeps the row for real delivered-container
+// history), this actually removes the row. Any orders still sitting in it
+// are dropped back into the unassigned pool (container_id = NULL) rather
+// than deleted themselves - a mistaken container shouldn't take real order
+// records down with it.
+router.delete('/containers/:id', blockBuyerWrite, (req, res) => {
+  const container = db.prepare('SELECT * FROM containers WHERE id = ?').get(req.params.id);
+  if (!container) return res.status(404).json({ error: 'Container not found' });
+  db.prepare('UPDATE orders SET container_id = NULL WHERE container_id = ?').run(container.id);
+  db.prepare('DELETE FROM containers WHERE id = ?').run(container.id);
+  res.json({ ok: true });
+});
+
 // ---- Orders ----
 router.put('/orders/:id', blockBuyerWrite, (req, res) => {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
