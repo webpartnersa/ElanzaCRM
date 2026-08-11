@@ -213,6 +213,24 @@ router.post('/', requireAuth, upload.array('photos', 10), async (req, res) => {
   const created = db.prepare('SELECT * FROM concepts WHERE id = ?').get(conceptId);
   attachCoverPhoto(created);
   const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(conceptId);
+
+  // Auto-generate the CAD from whatever reference photos were just
+  // uploaded, same AI call as the manual "Generate CAD" button - fired
+  // without awaiting it so concept creation itself isn't held up by a
+  // 10-30s image generation call. Runs on in this same process after the
+  // response below is sent; failures (missing API key, no usable photos,
+  // OpenAI errors) just log server-side rather than surfacing to the
+  // merchandiser, same as any other background job - the concept was
+  // already created successfully regardless of whether this succeeds.
+  if (openaiClient && !photoError && photos.length) {
+    const usablePhotos = photos.filter(p => OPENAI_IMAGE_EXT.includes(path.extname(p.path).toLowerCase()));
+    if (usablePhotos.length) {
+      generateConceptCadFromPhotos(created, usablePhotos).catch(e => {
+        console.error(`Auto CAD generation failed for ${created.concept_no}:`, e.message);
+      });
+    }
+  }
+
   res.json({ concept: scopeConceptForRole(created, user), photos, photoError });
 });
 
@@ -403,6 +421,47 @@ router.post('/:id/cad-details', requireAuth, upload.single('photo'), async (req,
 // Prompt below is the exact combination confirmed working well in testing:
 // gpt-image-1.5, input_fidelity 'high', quality 'high', both photos in one
 // call, and this detailed "replication task, not a design task" prompt.
+// OpenAI's image model only accepts jpeg/png/webp input - confirmed via its
+// own rejection error for both gif and avif ("Supported file formats are
+// 'image/jpeg', 'image/png', and 'image/webp'"). An allowlist here is more
+// robust than excluding known-bad formats one at a time.
+const OPENAI_IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.webp'];
+
+// Shared by the manual "Generate CAD" button (POST :id/generate-cad-ai
+// below) and the auto-trigger fired right after a new concept is created
+// with photos (see POST '/' above) - same AI call and same save-as-role='cad'
+// result either way, callers just differ in whether they await it for a
+// response or fire-and-forget it in the background.
+async function generateConceptCadFromPhotos(concept, photoRows) {
+  const imageFiles = await Promise.all(photoRows.map(p => {
+    const fullPath = resolveUploadPath(p.path);
+    return toFile(fs.createReadStream(fullPath), null, { type: mimeFromExt(fullPath) });
+  }));
+
+  const prompt = `Using the attached reference images, create a high-end photograph of the front and back of the garment${concept.description ? ' ("' + concept.description + '")' : ''}, as if it were laid flat on a plain white floor/surface and photographed from directly above with soft, even natural lighting - a real photo of a physical garment on a plain white background, not a flat vector illustration or CAD-style graphic. Show realistic fabric texture, weight and drape, with natural folds and soft shadows consistent with real fabric resting on a flat surface.
+
+Look at all the details in the reference images carefully, and do not alter any of the design elements - colour, print, embroidery, construction, and proportions must all match exactly as shown.`;
+
+  const result = await openaiClient.images.edit({
+    model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5',
+    image: imageFiles,
+    input_fidelity: 'high',
+    quality: 'high',
+    prompt,
+    size: '1536x1024'
+  });
+
+  const b64 = result.data[0].b64_json;
+  const buffer = Buffer.from(b64, 'base64');
+  const filename = `${concept.concept_no.toLowerCase()}.webp`;
+  await convertBufferToWebpFile(buffer, path.join(CAD_DIR, filename));
+  // Replace any previous CAD entry rather than stacking duplicates that
+  // would all point at the same (now overwritten) file.
+  db.prepare("DELETE FROM concept_photos WHERE concept_id = ? AND role = 'cad'").run(concept.id);
+  db.prepare('INSERT INTO concept_photos (concept_id, path, role) VALUES (?,?,?)').run(concept.id, '/uploads/concepts/' + filename, 'cad');
+  db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
+}
+
 router.post('/:id/generate-cad-ai', requireAuth, async (req, res) => {
   const user = req.session.user;
   if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
@@ -414,11 +473,6 @@ router.post('/:id/generate-cad-ai', requireAuth, async (req, res) => {
   const { photoIds } = req.body || {};
   if (!Array.isArray(photoIds) || !photoIds.length) return res.status(400).json({ error: 'photoIds array is required' });
 
-  // OpenAI's image model only accepts jpeg/png/webp input - confirmed via
-  // its own rejection error for both gif and avif ("Supported file formats
-  // are 'image/jpeg', 'image/png', and 'image/webp'"). An allowlist here
-  // is more robust than excluding known-bad formats one at a time.
-  const OPENAI_IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.webp'];
   const photoRows = photoIds
     .map(id => db.prepare('SELECT * FROM concept_photos WHERE id = ? AND concept_id = ?').get(id, concept.id))
     .filter(Boolean)
@@ -427,33 +481,7 @@ router.post('/:id/generate-cad-ai', requireAuth, async (req, res) => {
   if (!photoRows.length) return res.status(400).json({ error: 'No usable reference photos (must be jpg, png or webp - gif and avif are not supported as AI input)' });
 
   try {
-    const imageFiles = await Promise.all(photoRows.map(p => {
-      const fullPath = resolveUploadPath(p.path);
-      return toFile(fs.createReadStream(fullPath), null, { type: mimeFromExt(fullPath) });
-    }));
-
-    const prompt = `Using the attached reference images, create a high-end photograph of the front and back of the garment${concept.description ? ' ("' + concept.description + '")' : ''}, as if it were laid flat on a plain white floor/surface and photographed from directly above with soft, even natural lighting - a real photo of a physical garment on a plain white background, not a flat vector illustration or CAD-style graphic. Show realistic fabric texture, weight and drape, with natural folds and soft shadows consistent with real fabric resting on a flat surface.
-
-Look at all the details in the reference images carefully, and do not alter any of the design elements - colour, print, embroidery, construction, and proportions must all match exactly as shown.`;
-
-    const result = await openaiClient.images.edit({
-      model: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5',
-      image: imageFiles,
-      input_fidelity: 'high',
-      quality: 'high',
-      prompt,
-      size: '1536x1024'
-    });
-
-    const b64 = result.data[0].b64_json;
-    const buffer = Buffer.from(b64, 'base64');
-    const filename = `${concept.concept_no.toLowerCase()}.webp`;
-    await convertBufferToWebpFile(buffer, path.join(CAD_DIR, filename));
-    // Replace any previous CAD entry rather than stacking duplicates that
-    // would all point at the same (now overwritten) file.
-    db.prepare("DELETE FROM concept_photos WHERE concept_id = ? AND role = 'cad'").run(concept.id);
-    db.prepare('INSERT INTO concept_photos (concept_id, path, role) VALUES (?,?,?)').run(concept.id, '/uploads/concepts/' + filename, 'cad');
-    db.prepare('UPDATE concepts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(concept.id);
+    await generateConceptCadFromPhotos(concept, photoRows);
     const photos = db.prepare('SELECT * FROM concept_photos WHERE concept_id = ? ORDER BY sort_order ASC, id ASC').all(concept.id);
     res.json({ photos });
   } catch (e) {

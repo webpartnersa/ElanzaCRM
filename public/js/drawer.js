@@ -28,7 +28,7 @@ function blankStyleDraft(){
 // on styles rather than being renamed to match).
 const CONCEPT_TO_STYLE_FIELD_RENAMES = { topstitching: 'topstitch' };
 const CONCEPT_TO_STYLE_FIELDS = [
-  'description', 'fabric_code', 'composition', 'weight', 'wash', 'colour', 'print', 'embroidery_applique',
+  'description', 'cad_description', 'fabric_code', 'composition', 'weight', 'wash', 'colour', 'print', 'embroidery_applique',
   'topstitching', 'trims', 'styling', 'units', 'size_range_id', 'packing', 'labels',
   'source', 'tags', 'concept_date', 'factory', 'shipping_date', 'dc_date',
   'cost_estimate', 'buyer_rand_target', 'buyer_rsp_target', 'factory_target_price', 'factory_price', 'factory_cost_options'
