@@ -764,6 +764,18 @@ ensureColumn('orders', 'dc_status', "TEXT DEFAULT ''");
 // Recomputed server-side on every slot change (see routes/finalSubmission.js),
 // not user-editable directly except the explicit "mark sent" action.
 ensureColumn('orders', 'final_submission_status', "TEXT DEFAULT ''");
+// The buyer's written worksheet confirming their verbal go-ahead on this
+// order (see routes/shipping.js's worksheet upload routes) - deliberately
+// separate from order_submission_docs/DOC_TYPES (routes/finalSubmission.js):
+// a worksheet is an internal Elanzas record of order confirmation, not one
+// of the documents that ever gets bundled/emailed to the buyer as part of
+// bulk submission, so it doesn't belong in that checklist or its zip/email.
+// Per-order rather than per-style since a repeat order needs its own
+// worksheet, not the original run's.
+ensureColumn('orders', 'worksheet_file_path', 'TEXT');
+ensureColumn('orders', 'worksheet_original_filename', 'TEXT');
+ensureColumn('orders', 'worksheet_uploaded_by', 'TEXT');
+ensureColumn('orders', 'worksheet_uploaded_at', 'TEXT');
 // Garment Manufacturer's country on the Material Submission form - fabric
 // supplier/yarn supplier already have their own country_of_origin on
 // fabrics (see db.js's fabrics migration comment), this is the third of

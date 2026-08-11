@@ -657,6 +657,7 @@ function renderShippingDrawerHost(){
       </div>
       <div class="tabs">
         <button class="tab ${currentTab==='product'?'active':''}" onclick="setShippingDrawerTab('product')">Product</button>
+        <button class="tab ${currentTab==='documents'?'active':''}" onclick="setShippingDrawerTab('documents')">Documents${o.worksheet_file_path?' &#10003;':''}</button>
         <button class="tab ${currentTab==='factory'?'active':''}" onclick="setShippingDrawerTab('factory')">Factory</button>
         <button class="tab ${currentTab==='costing'?'active':''}" onclick="setShippingDrawerTab('costing')">Costing</button>
         <button class="tab ${currentTab==='invoicing'?'active':''}" onclick="setShippingDrawerTab('invoicing')">Invoicing</button>
@@ -678,6 +679,7 @@ function renderShippingDrawerHost(){
           <div class="row2">${field('po_cartons','PO # of cartons')}${field('true_cartons','True cartons')}</div>
           <div class="row2">${field('true_cbm','True CBM')}${field('units_shipped','True units shipped')}</div>
         ` : ''}
+        ${currentTab==='documents' ? renderOrderDocumentsTab(o) : ''}
         ${currentTab==='factory' ? `
           <div class="field">
             <label>Fabric code</label>
@@ -726,6 +728,87 @@ function renderShippingDrawerHost(){
         <button class="btn btn-primary" onclick="saveShippingDrawer()">Save changes</button>
       </footer>
     </div>`;
+}
+
+// ---- Documents: the two documents that confirm an order is real, before
+// bulk submission is even on the horizon - the buyer's verbal go-ahead
+// (proceed purely on that), then the Worksheet confirming it in writing,
+// then the actual PO requested off the back of that. Worksheet is its own
+// simple per-order upload (routes/shipping.js) - PO reuses the exact same
+// sap_po slot Final Submission already tracks (routes/finalSubmission.js),
+// just surfaced here too since a PO is needed as soon as it arrives, not
+// only once the whole bulk-submission bundle is being put together.
+function renderOrderDocumentsTab(o){
+  const sub = state.shippingDrawer.submission;
+  const poSlot = sub ? sub.slots.find(s => s.key === 'sap_po') : null;
+  return `
+    <div class="submission-slots">
+      <div class="submission-slot ${o.worksheet_file_path?'filled':''}">
+        <div class="submission-slot-main">
+          <span class="submission-slot-icon">${o.worksheet_file_path ? '✓' : '○'}</span>
+          <div class="submission-slot-info">
+            <div class="submission-slot-label">Worksheet</div>
+            ${o.worksheet_file_path
+              ? `<div class="submission-slot-meta">${o.worksheet_original_filename||''}${o.worksheet_uploaded_by?' · by '+o.worksheet_uploaded_by:''}</div>`
+              : `<div class="submission-slot-meta hint">Buyer's written confirmation - not on file yet</div>`}
+          </div>
+        </div>
+        <div class="submission-slot-actions">
+          ${o.worksheet_file_path ? `<a class="btn btn-sm btn-ghost" href="/api/shipping/orders/${o.id}/worksheet" target="_blank">View</a>` : ''}
+          <input type="file" id="worksheet-file-input" accept=".pdf,.doc,.docx,.xlsx,.xls,.png,.jpg,.jpeg" style="display:none" onchange="uploadOrderWorksheet('${o.id}',this)"/>
+          <button class="btn btn-sm btn-ghost" onclick="document.getElementById('worksheet-file-input').click()">${o.worksheet_file_path ? 'Replace' : 'Upload'}</button>
+          ${o.worksheet_file_path ? `<button class="btn btn-sm btn-danger" onclick="removeOrderWorksheet('${o.id}')">Remove</button>` : ''}
+        </div>
+      </div>
+      ${!sub ? `<p class="hint">Loading...</p>` : `
+        <div class="submission-slot ${poSlot.filled?'filled':''}">
+          <div class="submission-slot-main">
+            <span class="submission-slot-icon">${poSlot.filled ? '✓' : '○'}</span>
+            <div class="submission-slot-info">
+              <div class="submission-slot-label">Latest SAP PO</div>
+              ${poSlot.filled
+                ? `<div class="submission-slot-meta">${poSlot.original_filename||''}${poSlot.uploaded_by?' · by '+poSlot.uploaded_by:''}</div>`
+                : `<div class="submission-slot-meta hint">Not on file yet</div>`}
+            </div>
+          </div>
+          <div class="submission-slot-actions">
+            ${poSlot.filled ? `<a class="btn btn-sm btn-ghost" href="/api/shipping/orders/${o.id}/submission/sap_po/file" target="_blank">View</a>` : ''}
+            <input type="file" id="po-file-input" accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg" style="display:none" onchange="uploadSubmissionDoc('${o.id}','sap_po',this)"/>
+            <button class="btn btn-sm btn-ghost" onclick="document.getElementById('po-file-input').click()">${poSlot.filled ? 'Replace' : 'Upload'}</button>
+            ${poSlot.filled ? `<button class="btn btn-sm btn-danger" onclick="removeSubmissionDoc('${o.id}','sap_po')">Remove</button>` : ''}
+          </div>
+        </div>
+        <p class="hint" style="margin-top:4px;">This is the same PO tracked in Final Submission's bulk checklist - uploading it here or there fills the same slot.</p>
+      `}
+    </div>
+  `;
+}
+
+async function uploadOrderWorksheet(orderId, inputEl){
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/shipping/orders/'+orderId+'/worksheet', { method:'POST', body: formData });
+    const data = await res.json().catch(()=>({}));
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    const found = findShippingOrder(orderId);
+    if (found) Object.assign(found.order, data.order);
+    render();
+    toast('Worksheet uploaded');
+  } catch(e) { toast('Could not upload: ' + e.message); }
+  inputEl.value = '';
+}
+
+async function removeOrderWorksheet(orderId){
+  if (!confirm('Remove the worksheet on file for this order?')) return;
+  try {
+    const data = await api('/api/shipping/orders/'+orderId+'/worksheet', { method:'DELETE' });
+    const found = findShippingOrder(orderId);
+    if (found) Object.assign(found.order, data.order);
+    render();
+  } catch(e) { toast('Could not remove: ' + e.message); }
 }
 
 // ---- Final Submission: the fixed bundle of documents PnP requires per

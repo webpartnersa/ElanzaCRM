@@ -1,4 +1,7 @@
 const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 
@@ -214,6 +217,83 @@ router.put('/move', blockBuyerWrite, (req, res) => {
   const update = db.prepare('UPDATE orders SET container_id = ?, sort_order = ?, container_code = ? WHERE id = ?');
   order.forEach((orderId, i) => update.run(containerId != null ? containerId : null, i, containerCode, orderId));
   res.json({ ok: true });
+});
+
+// ---- Worksheet: the buyer's written confirmation of their verbal
+// go-ahead - see db.js's comment on why this is its own small thing
+// (private storage, one file per order) rather than living in
+// order_submission_docs alongside the buyer-facing bulk submission docs. ----
+const PRIVATE_WORKSHEET_DIR = path.join(__dirname, '..', 'private', 'worksheets');
+fs.mkdirSync(PRIVATE_WORKSHEET_DIR, { recursive: true });
+
+function safeSegment(v, fallback) {
+  return (v || fallback || '').toString().trim().replace(/[^a-zA-Z0-9_-]+/g, '_') || fallback;
+}
+function mimeFromExt(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.pdf') return 'application/pdf';
+  if (ext === '.xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (ext === '.xls') return 'application/vnd.ms-excel';
+  if (ext === '.png') return 'image/png';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  return 'application/octet-stream';
+}
+
+const ALLOWED_WORKSHEET_EXT = ['.pdf', '.xlsx', '.xls', '.doc', '.docx', '.png', '.jpg', '.jpeg'];
+const uploadWorksheet = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!req.session.user || req.session.user.role === 'buyer') return cb(new Error('Not authorized'));
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (!ALLOWED_WORKSHEET_EXT.includes(ext)) return cb(new Error('Unsupported file type - allowed: PDF, Word, Excel, PNG, JPG'));
+    cb(null, true);
+  }
+});
+
+router.post('/orders/:id/worksheet', blockBuyerWrite, uploadWorksheet.single('file'), (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!req.file) return res.status(400).json({ error: 'A file is required' });
+
+  const ext = path.extname(req.file.originalname || '').toLowerCase();
+  const filename = `${safeSegment(order.style_no, 'style')}-${safeSegment(order.order_no, 'order' + order.id)}-worksheet${ext}`;
+  fs.writeFileSync(path.join(PRIVATE_WORKSHEET_DIR, filename), req.file.buffer);
+
+  db.prepare(`
+    UPDATE orders SET worksheet_file_path = ?, worksheet_original_filename = ?,
+      worksheet_uploaded_by = ?, worksheet_uploaded_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(filename, req.file.originalname, req.session.user.name, order.id);
+  const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  attachDelays(updated);
+  res.json({ order: updated });
+});
+
+router.get('/orders/:id/worksheet', (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!order || !order.worksheet_file_path) return res.status(404).json({ error: 'No worksheet on file' });
+  const fullPath = path.join(PRIVATE_WORKSHEET_DIR, order.worksheet_file_path);
+  if (!fs.existsSync(fullPath)) return res.status(404).json({ error: 'File missing on disk' });
+  res.set('Content-Type', mimeFromExt(fullPath));
+  res.set('Content-Disposition', `inline; filename="${(order.worksheet_original_filename || 'worksheet').replace(/"/g, '')}"`);
+  fs.createReadStream(fullPath).pipe(res);
+});
+
+router.delete('/orders/:id/worksheet', blockBuyerWrite, (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.worksheet_file_path) {
+    fs.unlink(path.join(PRIVATE_WORKSHEET_DIR, order.worksheet_file_path), () => {});
+  }
+  db.prepare(`
+    UPDATE orders SET worksheet_file_path = NULL, worksheet_original_filename = NULL,
+      worksheet_uploaded_by = NULL, worksheet_uploaded_at = NULL
+    WHERE id = ?
+  `).run(order.id);
+  const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  attachDelays(updated);
+  res.json({ order: updated });
 });
 
 module.exports = router;
