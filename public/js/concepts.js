@@ -39,7 +39,7 @@ function renderConceptsView(){
   const filtered = state.concepts.filter(c=>{
     if (state.departmentFilterConcepts !== 'All' && c.department !== state.departmentFilterConcepts) return false;
     if (q) {
-      const hay = ((c.description||'') + ' ' + (c.tags||'')).toLowerCase();
+      const hay = ((c.concept_no||'') + ' ' + (c.description||'') + ' ' + (c.tags||'')).toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -52,7 +52,7 @@ function renderConceptsView(){
           <option value="All" ${state.departmentFilterConcepts==='All'?'selected':''}>All departments</option>
           ${DEPARTMENTS.map(d=>`<option value="${d}" ${state.departmentFilterConcepts===d?'selected':''}>${d}</option>`).join('')}
         </select>
-        <input id="concept-search" placeholder="Search description or tags..." value="${state.conceptSearch}" oninput="setConceptSearch(this.value)" style="width:220px;"/>
+        <input id="concept-search" placeholder="Search code, description or tags..." value="${state.conceptSearch}" oninput="setConceptSearch(this.value)" style="width:220px;"/>
         ${canCreate ? `<button class="btn btn-ghost" onclick="openSpecManager()">Manage Spec Hierarchy</button>` : ''}
         ${canCreate ? `<button class="btn btn-ghost" onclick="openSizeManager()">Manage Size Ranges</button>` : ''}
         ${canCreate ? `<button class="btn btn-primary" onclick="openNewConcept()">+ New Concept</button>` : ''}
