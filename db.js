@@ -453,6 +453,21 @@ CREATE TABLE IF NOT EXISTS concepts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(order_id, doc_type)
   );
+
+  -- A mismatch AI found between an order's worksheet and its PO (see
+  -- lib/orderDocExtract.js/orderDocCompare.js) - e.g. the retailer's PO
+  -- shows fewer units or a different unit price than the worksheet they
+  -- confirmed. One row per order holding every field that currently
+  -- differs (re-run and replaced wholesale on every new comparison, not
+  -- accumulated), same one-message-per-issue convention as
+  -- fabric_report_flags. Surfaced in the Notification Centre so Elanza can
+  -- flag it back to the retailer to correct the PO.
+  CREATE TABLE IF NOT EXISTS order_doc_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // One-time backfill: auto-link every already-uploaded report to every style
@@ -822,6 +837,23 @@ ensureColumn('orders', 'worksheet_file_path', 'TEXT');
 ensureColumn('orders', 'worksheet_original_filename', 'TEXT');
 ensureColumn('orders', 'worksheet_uploaded_by', 'TEXT');
 ensureColumn('orders', 'worksheet_uploaded_at', 'TEXT');
+// What the worksheet/PO documents themselves actually say, extracted by AI
+// on upload (see lib/orderDocExtract.js) - deliberately separate from the
+// order's own live-tracked units/po_price/po_delivery_date (which a
+// merchandiser can freely edit for operational tracking) so the two
+// documents can be diffed against each other even after those working
+// fields have moved on. _label is the variant text the document used for
+// this order (e.g. "REAL YB RUGBY FLEECE MULTI") - not compared, just kept
+// so a human can sanity-check which line of a multi-variant document this
+// order's numbers came from.
+ensureColumn('orders', 'worksheet_extract_label', 'TEXT');
+ensureColumn('orders', 'worksheet_extract_units', 'TEXT');
+ensureColumn('orders', 'worksheet_extract_price', 'TEXT');
+ensureColumn('orders', 'worksheet_extract_dc_date', 'TEXT');
+ensureColumn('orders', 'po_extract_label', 'TEXT');
+ensureColumn('orders', 'po_extract_units', 'TEXT');
+ensureColumn('orders', 'po_extract_price', 'TEXT');
+ensureColumn('orders', 'po_extract_dc_date', 'TEXT');
 // Garment Manufacturer's country on the Material Submission form - fabric
 // supplier/yarn supplier already have their own country_of_origin on
 // fabrics (see db.js's fabrics migration comment), this is the third of

@@ -58,6 +58,7 @@ async function bootstrapApp(user){
   // renders on every screen - needs to be loaded up front too, not just
   // once the Notifications tab is visited.
   if (hasPerm(user,'shipping') || hasPerm(user,'fabrics')) { initNotificationsState(); loadNotificationReads(); }
+  if (hasPerm(user,'shipping')) { initShippingState(); loadOrderDocFlags(); }
 
   if (state.view === 'shipping') await loadShipping();
   else if (state.view === 'concepts') await loadConcepts();

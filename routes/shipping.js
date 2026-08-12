@@ -4,6 +4,12 @@ const fs = require('fs');
 const path = require('path');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
+const OpenAI = require('openai');
+const { extractOrderDoc } = require('../lib/orderDocExtract');
+const { pickSelfVariant, findSiblingCandidates } = require('../lib/orderDocMatch');
+const { compareOrderDocs } = require('../lib/orderDocCompare');
+
+const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const router = express.Router();
 
@@ -193,6 +199,7 @@ router.delete('/orders/:id', blockBuyerWrite, (req, res) => {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   db.prepare('DELETE FROM order_delays WHERE order_id = ?').run(order.id);
+  db.prepare('DELETE FROM order_doc_flags WHERE order_id = ?').run(order.id);
   db.prepare('DELETE FROM orders WHERE id = ?').run(order.id);
   res.json({ ok: true });
 });
@@ -251,7 +258,7 @@ const uploadWorksheet = multer({
   }
 });
 
-router.post('/orders/:id/worksheet', blockBuyerWrite, uploadWorksheet.single('file'), (req, res) => {
+router.post('/orders/:id/worksheet', blockBuyerWrite, uploadWorksheet.single('file'), async (req, res) => {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (!req.file) return res.status(400).json({ error: 'A file is required' });
@@ -265,7 +272,82 @@ router.post('/orders/:id/worksheet', blockBuyerWrite, uploadWorksheet.single('fi
       worksheet_uploaded_by = ?, worksheet_uploaded_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(filename, req.file.originalname, req.session.user.name, order.id);
+
+  // Best-effort AI extraction (see lib/orderDocExtract.js) - reads the
+  // worksheet's own unit price/units/delivery date so they can be diffed
+  // against whatever's already in this order's PO, and so a multi-
+  // department worksheet (one covering both Younger Boys and Older Boys,
+  // say) can be offered to whichever other order matches the department
+  // this one doesn't already belong to. Never blocks the upload itself.
+  let suggestions = [];
+  if (ext === '.pdf' && openaiClient) {
+    try {
+      const { variants } = await extractOrderDoc(req.file.buffer, openaiClient);
+      if (variants.length) {
+        const style = order.style_id ? db.prepare('SELECT department FROM styles WHERE id = ?').get(order.style_id) : null;
+        const selfVariant = pickSelfVariant(variants, style ? style.department : null);
+        if (selfVariant) {
+          db.prepare(`
+            UPDATE orders SET worksheet_extract_label = ?, worksheet_extract_units = ?,
+              worksheet_extract_price = ?, worksheet_extract_dc_date = ?
+            WHERE id = ?
+          `).run(selfVariant.label || null, selfVariant.units || null, selfVariant.unit_price || null, selfVariant.delivery_date || null, order.id);
+          compareOrderDocs(order.id);
+        }
+        suggestions = findSiblingCandidates(variants, selfVariant, order.id)
+          .filter(s => s.candidates.length)
+          .map(s => ({
+            variant: s.variant,
+            candidates: s.candidates.map(o => ({ id: o.id, style_no: o.style_no, description: o.description || o.style_description })),
+          }));
+      }
+    } catch (e) {
+      console.error('Worksheet AI extraction failed for order', order.id, ':', e.message);
+    }
+  }
+
   const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  attachDelays(updated);
+  res.json({ order: updated, suggestions });
+});
+
+// Applies the worksheet already on file for order :id onto a different
+// order (:targetId) - one document genuinely covering more than one
+// department's order, offered as a suggestion right after the original
+// upload (see suggestions in the route above) and confirmed here rather
+// than applied automatically, since the department/description match is
+// only a best guess. The file itself is copied (not shared/referenced) so
+// each order's worksheet slot stays independently removable, same as an
+// ordinary upload; `variant` (the AI's extracted fields for the target's
+// own department) comes straight from that suggestion rather than
+// re-parsing the PDF a second time.
+router.post('/orders/:id/worksheet/apply-to/:targetId', blockBuyerWrite, (req, res) => {
+  const source = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  const target = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.targetId);
+  if (!source || !target) return res.status(404).json({ error: 'Order not found' });
+  if (!source.worksheet_file_path) return res.status(400).json({ error: 'Source order has no worksheet on file' });
+  const sourcePath = path.join(PRIVATE_WORKSHEET_DIR, source.worksheet_file_path);
+  if (!fs.existsSync(sourcePath)) return res.status(404).json({ error: 'Worksheet file missing on disk' });
+
+  const variant = req.body && req.body.variant || {};
+  const ext = path.extname(source.worksheet_file_path);
+  const filename = `${safeSegment(target.style_no, 'style')}-${safeSegment(target.order_no, 'order' + target.id)}-worksheet${ext}`;
+  fs.copyFileSync(sourcePath, path.join(PRIVATE_WORKSHEET_DIR, filename));
+
+  db.prepare(`
+    UPDATE orders SET worksheet_file_path = ?, worksheet_original_filename = ?,
+      worksheet_uploaded_by = ?, worksheet_uploaded_at = CURRENT_TIMESTAMP,
+      worksheet_extract_label = ?, worksheet_extract_units = ?,
+      worksheet_extract_price = ?, worksheet_extract_dc_date = ?
+    WHERE id = ?
+  `).run(
+    filename, source.worksheet_original_filename, req.session.user.name,
+    variant.label || null, variant.units || null, variant.unit_price || null, variant.delivery_date || null,
+    target.id
+  );
+  compareOrderDocs(target.id);
+
+  const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(target.id);
   attachDelays(updated);
   res.json({ order: updated });
 });
@@ -288,12 +370,28 @@ router.delete('/orders/:id/worksheet', blockBuyerWrite, (req, res) => {
   }
   db.prepare(`
     UPDATE orders SET worksheet_file_path = NULL, worksheet_original_filename = NULL,
-      worksheet_uploaded_by = NULL, worksheet_uploaded_at = NULL
+      worksheet_uploaded_by = NULL, worksheet_uploaded_at = NULL,
+      worksheet_extract_label = NULL, worksheet_extract_units = NULL,
+      worksheet_extract_price = NULL, worksheet_extract_dc_date = NULL
     WHERE id = ?
   `).run(order.id);
+  compareOrderDocs(order.id); // nothing left to compare against - clears any stale flag
   const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
   attachDelays(updated);
   res.json({ order: updated });
+});
+
+// Feeds the Notification Centre's "Worksheet/PO inconsistencies" section -
+// joins in style_no/description so a flag can be shown and linked without a
+// second round-trip per row, same pattern as fabrics' GET /report-flags.
+router.get('/order-doc-flags', (req, res) => {
+  const rows = db.prepare(`
+    SELECT f.*, o.style_no, o.description, o.order_no
+    FROM order_doc_flags f
+    JOIN orders o ON o.id = f.order_id
+    ORDER BY f.created_at DESC, f.id DESC
+  `).all();
+  res.json({ flags: rows });
 });
 
 module.exports = router;

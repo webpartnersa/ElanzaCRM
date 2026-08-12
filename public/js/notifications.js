@@ -119,20 +119,34 @@ function collectInconsistencyAlerts(){
     .filter(({key}) => !isNotifDismissed(key));
 }
 
+// A mismatch AI found between an order's worksheet and its PO (see
+// db.js's order_doc_flags / lib/orderDocCompare.js) - same reasoning as
+// collectInconsistencyAlerts: a real stored row, not re-derived, so the
+// key is just the flag's own id.
+function collectOrderDocFlagAlerts(){
+  if (!state.orderDocFlags) return [];
+  return state.orderDocFlags
+    .map(f => ({ flag: f, key: `orderdocflag:${f.id}` }))
+    .filter(({key}) => !isNotifDismissed(key));
+}
+
 function collectUnreadNotificationCount(){
   const delayAlerts = hasPerm(state.user,'shipping') ? collectDelayAlerts() : [];
   const fabricAlerts = hasPerm(state.user,'fabrics') ? collectFabricAlerts() : [];
   const inconsistencyAlerts = hasPerm(state.user,'fabrics') ? collectInconsistencyAlerts() : [];
+  const orderDocAlerts = hasPerm(state.user,'shipping') ? collectOrderDocFlagAlerts() : [];
   return delayAlerts.filter(a=>!isNotifRead(a.key)).length
     + fabricAlerts.filter(a=>!isNotifRead(a.key)).length
-    + inconsistencyAlerts.filter(a=>!isNotifRead(a.key)).length;
+    + inconsistencyAlerts.filter(a=>!isNotifRead(a.key)).length
+    + orderDocAlerts.filter(a=>!isNotifRead(a.key)).length;
 }
 
 function markAllNotificationsRead(){
   const delayAlerts = collectDelayAlerts();
   const fabricAlerts = collectFabricAlerts();
   const inconsistencyAlerts = collectInconsistencyAlerts();
-  markNotificationsRead([...delayAlerts, ...fabricAlerts, ...inconsistencyAlerts].map(a=>a.key));
+  const orderDocAlerts = collectOrderDocFlagAlerts();
+  markNotificationsRead([...delayAlerts, ...fabricAlerts, ...inconsistencyAlerts, ...orderDocAlerts].map(a=>a.key));
 }
 
 function renderNotificationsView(){
@@ -140,7 +154,8 @@ function renderNotificationsView(){
   const delayAlerts = collectDelayAlerts();
   const fabricAlerts = collectFabricAlerts();
   const inconsistencyAlerts = collectInconsistencyAlerts();
-  const total = delayAlerts.length + fabricAlerts.length + inconsistencyAlerts.length;
+  const orderDocAlerts = collectOrderDocFlagAlerts();
+  const total = delayAlerts.length + fabricAlerts.length + inconsistencyAlerts.length + orderDocAlerts.length;
   const unread = collectUnreadNotificationCount();
   const selectedCount = state.notifSelectedKeys.size;
   return `
@@ -220,6 +235,25 @@ function renderNotificationsView(){
         `;}).join('')}
       </div>
     ` : ''}
+    ${orderDocAlerts.length ? `
+      <h2 class="section-heading" style="margin-top:20px;">Worksheet/PO inconsistencies</h2>
+      <div class="card">
+        ${orderDocAlerts.map(({flag, key})=>{
+          const unread = !isNotifRead(key);
+          return `
+          <div class="style-row ${unread?'notif-unread':''}" onclick="viewOrderDocFlagAlert(${flag.order_id},'${key}')">
+            ${notifCheckbox(key)}
+            <div>
+              <div class="style-name">${unread?'<span class="notif-dot" title="Unread"></span>':''}${flag.style_no||'(no style number)'}${flag.order_no?' &middot; '+flag.order_no:''}</div>
+              <div class="style-meta">${flag.message}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); viewOrderDocFlagAlert(${flag.order_id},'${key}')">View</button>
+            </div>
+          </div>
+        `;}).join('')}
+      </div>
+    ` : ''}
   `;
 }
 
@@ -230,6 +264,12 @@ function viewDelayedOrder(orderId, key){
   if (key) markNotificationsRead([key]);
   state.view = 'shipping';
   openShippingDrawer(orderId, 'delays');
+}
+
+function viewOrderDocFlagAlert(orderId, key){
+  if (key) markNotificationsRead([key]);
+  state.view = 'shipping';
+  openShippingDrawer(orderId, 'documents');
 }
 
 function viewReportRenewalAlert(reportId, key){

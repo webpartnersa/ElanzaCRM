@@ -61,6 +61,17 @@ function initShippingState(){
   if (state.shippingSuggestion === undefined) state.shippingSuggestion = null;
   if (state.shippingDragSourceId === undefined) state.shippingDragSourceId = null;
   if (state.shippingStatusFilter === undefined) state.shippingStatusFilter = '';
+  if (state.orderDocFlags === undefined) state.orderDocFlags = [];
+}
+
+// Feeds the Notification Centre's "Worksheet/PO inconsistencies" section
+// (public/js/notifications.js) - same pattern as fabrics'
+// loadFabricReportFlags.
+async function loadOrderDocFlags(){
+  initShippingState();
+  const { flags } = await api('/api/shipping/order-doc-flags');
+  state.orderDocFlags = flags;
+  render();
 }
 
 // Maps an order onto one of the three filter buckets - delivered (its own
@@ -580,7 +591,7 @@ function onShippingDropOnGroup(e, groupId){
 function openShippingDrawer(orderId, tab){
   const found = findShippingOrder(orderId);
   if (!found) return;
-  state.shippingDrawer = { orderId, tab: tab || 'product', title: found.order.style_no + ' - ' + found.group.container_no, submission: null };
+  state.shippingDrawer = { orderId, tab: tab || 'product', title: found.order.style_no + ' - ' + found.group.container_no, submission: null, docSuggestions: {} };
   render();
   loadOrderSubmission(orderId);
 }
@@ -741,7 +752,13 @@ function renderShippingDrawerHost(){
 function renderOrderDocumentsTab(o){
   const sub = state.shippingDrawer.submission;
   const poSlot = sub ? sub.slots.find(s => s.key === 'sap_po') : null;
+  const flags = (state.orderDocFlags||[]).filter(f => f.order_id === o.id);
   return `
+    ${flags.length ? `
+      <div class="hint" style="margin-bottom:12px;background:#F6E4E4;color:var(--stitch-red);padding:10px;border-radius:var(--radius);">
+        ${flags.map(f => f.message).join(' ')}
+      </div>
+    ` : ''}
     <div class="submission-slots">
       <div class="submission-slot ${o.worksheet_file_path?'filled':''}">
         <div class="submission-slot-main">
@@ -760,6 +777,7 @@ function renderOrderDocumentsTab(o){
           ${o.worksheet_file_path ? `<button class="btn btn-sm btn-danger" onclick="removeOrderWorksheet('${o.id}')">Remove</button>` : ''}
         </div>
       </div>
+      ${renderDocSuggestions('worksheet', 'worksheet')}
       ${!sub ? `<p class="hint">Loading...</p>` : `
         <div class="submission-slot ${poSlot.filled?'filled':''}">
           <div class="submission-slot-main">
@@ -778,6 +796,7 @@ function renderOrderDocumentsTab(o){
             ${poSlot.filled ? `<button class="btn btn-sm btn-danger" onclick="removeSubmissionDoc('${o.id}','sap_po')">Remove</button>` : ''}
           </div>
         </div>
+        ${renderDocSuggestions('sap_po', 'PO')}
         <p class="hint" style="margin-top:4px;">This is the same PO tracked in Final Submission's bulk checklist - uploading it here or there fills the same slot.</p>
       `}
     </div>
@@ -795,6 +814,8 @@ async function uploadOrderWorksheet(orderId, inputEl){
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     const found = findShippingOrder(orderId);
     if (found) Object.assign(found.order, data.order);
+    if (state.shippingDrawer) state.shippingDrawer.docSuggestions.worksheet = data.suggestions || [];
+    loadOrderDocFlags();
     render();
     toast('Worksheet uploaded');
   } catch(e) { toast('Could not upload: ' + e.message); }
@@ -807,8 +828,63 @@ async function removeOrderWorksheet(orderId){
     const data = await api('/api/shipping/orders/'+orderId+'/worksheet', { method:'DELETE' });
     const found = findShippingOrder(orderId);
     if (found) Object.assign(found.order, data.order);
+    loadOrderDocFlags();
     render();
   } catch(e) { toast('Could not remove: ' + e.message); }
+}
+
+// One worksheet/PO can genuinely cover more than one department's order
+// (see lib/orderDocMatch.js) - these suggestions come back right after an
+// upload, offering to copy the same file + that variant's own extracted
+// numbers onto whichever other order looks like a match, without needing
+// to upload the identical document a second time by hand. Only ever a
+// suggestion until Apply is clicked - nothing here writes anything on its
+// own, and Skip just clears it from view for this session.
+function renderDocSuggestions(docType, label){
+  const d = state.shippingDrawer;
+  const list = (d && d.docSuggestions[docType]) || [];
+  if (!list.length) return '';
+  return list.map(s => `
+    <div class="hint" style="margin-top:6px;background:var(--line-soft);padding:10px;border-radius:var(--radius);">
+      This ${label} also looks like it covers <strong>${s.variant.label||'another variant'}</strong>${s.variant.department_guess?` (${s.variant.department_guess})`:''}${s.variant.units?` - ${s.variant.units} units`:''}${s.variant.unit_price?`, R${s.variant.unit_price}/unit`:''} - apply it to:
+      ${s.candidates.map(c => `
+        <div class="row-actions" style="margin-top:6px;align-items:center;">
+          <span>${c.style_no||'(no style number)'}${c.description?' - '+c.description:''}</span>
+          <button class="btn btn-sm btn-primary" onclick="applyDocSuggestion('${docType}',${c.id})">Apply</button>
+          <button class="btn btn-sm btn-ghost" onclick="skipDocSuggestion('${docType}',${c.id})">Skip</button>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+}
+
+async function applyDocSuggestion(docType, targetOrderId){
+  const d = state.shippingDrawer;
+  if (!d) return;
+  const list = d.docSuggestions[docType] || [];
+  const entry = list.find(s => s.candidates.some(c => c.id === targetOrderId));
+  if (!entry) return;
+  const target = entry.candidates.find(c => c.id === targetOrderId);
+  try {
+    const endpoint = docType === 'worksheet'
+      ? `/api/shipping/orders/${d.orderId}/worksheet/apply-to/${targetOrderId}`
+      : `/api/shipping/orders/${d.orderId}/submission/sap_po/apply-to/${targetOrderId}`;
+    await api(endpoint, { method:'POST', body: JSON.stringify({ variant: entry.variant }) });
+    entry.candidates = entry.candidates.filter(c => c.id !== targetOrderId);
+    d.docSuggestions[docType] = list.filter(s => s.candidates.length);
+    loadOrderDocFlags();
+    render();
+    toast(`Applied to ${target.style_no || 'that order'}`);
+  } catch(e) { toast('Could not apply: ' + e.message); }
+}
+
+function skipDocSuggestion(docType, targetOrderId){
+  const d = state.shippingDrawer;
+  if (!d) return;
+  const list = d.docSuggestions[docType] || [];
+  list.forEach(s => { s.candidates = s.candidates.filter(c => c.id !== targetOrderId); });
+  d.docSuggestions[docType] = list.filter(s => s.candidates.length);
+  render();
 }
 
 // ---- Final Submission: the fixed bundle of documents PnP requires per
@@ -900,7 +976,12 @@ async function uploadSubmissionDoc(orderId, docType, inputEl){
     const res = await fetch('/api/shipping/orders/'+orderId+'/submission/'+docType+'/upload', { method:'POST', body: formData });
     const data = await res.json().catch(()=>({}));
     if (!res.ok) throw new Error(data.error || 'Upload failed');
-    if (state.shippingDrawer) { state.shippingDrawer.submission = data; render(); }
+    if (state.shippingDrawer) {
+      state.shippingDrawer.submission = data;
+      if (docType === 'sap_po') state.shippingDrawer.docSuggestions.sap_po = data.suggestions || [];
+    }
+    if (docType === 'sap_po') loadOrderDocFlags();
+    render();
     toast('Uploaded');
   } catch(e) { toast('Could not upload: ' + e.message); }
   inputEl.value = '';

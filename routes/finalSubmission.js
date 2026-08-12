@@ -12,6 +12,12 @@ const { buildChecklistWorkbook } = require('../lib/submissionChecklistExport');
 const { buildWashcareLabelPng } = require('../lib/washcareLabelExport');
 const { convertBufferToWebpFile } = require('../lib/imageConvert');
 const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
+const OpenAI = require('openai');
+const { extractOrderDoc } = require('../lib/orderDocExtract');
+const { pickSelfVariant, findSiblingCandidates } = require('../lib/orderDocMatch');
+const { compareOrderDocs } = require('../lib/orderDocCompare');
+
+const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const router = express.Router();
 
@@ -285,7 +291,7 @@ const uploadDoc = multer({
   }
 });
 
-router.post('/orders/:id/submission/:docType/upload', blockBuyerWrite, uploadDoc.single('file'), (req, res) => {
+router.post('/orders/:id/submission/:docType/upload', blockBuyerWrite, uploadDoc.single('file'), async (req, res) => {
   const order = getOrder(req.params.id);
   if (!order) return res.status(404).json({ error: 'Not found' });
   const dt = DOC_TYPES.find(d => d.key === req.params.docType);
@@ -308,7 +314,82 @@ router.post('/orders/:id/submission/:docType/upload', blockBuyerWrite, uploadDoc
   `).run(order.id, dt.key, relPath, req.file.originalname, req.session.user.name);
   bumpStatusIfNone(order.id);
 
-  res.json({ slots: getSlots(order) });
+  // Best-effort AI extraction, PO only (see lib/orderDocExtract.js) - reads
+  // the PO's own unit price/units/delivery date so they can be diffed
+  // against whatever's already in this order's worksheet, and so a
+  // multi-department PO (one covering both Younger Boys and Older Boys,
+  // say) can be offered to whichever other order matches the department
+  // this one doesn't already belong to. Never blocks the upload itself.
+  let suggestions = [];
+  if (dt.key === 'sap_po' && ext === '.pdf' && openaiClient) {
+    try {
+      const { variants } = await extractOrderDoc(req.file.buffer, openaiClient);
+      if (variants.length) {
+        const style = getStyleForOrder(order);
+        const selfVariant = pickSelfVariant(variants, style ? style.department : null);
+        if (selfVariant) {
+          db.prepare(`
+            UPDATE orders SET po_extract_label = ?, po_extract_units = ?,
+              po_extract_price = ?, po_extract_dc_date = ?
+            WHERE id = ?
+          `).run(selfVariant.label || null, selfVariant.units || null, selfVariant.unit_price || null, selfVariant.delivery_date || null, order.id);
+          compareOrderDocs(order.id);
+        }
+        suggestions = findSiblingCandidates(variants, selfVariant, order.id)
+          .filter(s => s.candidates.length)
+          .map(s => ({
+            variant: s.variant,
+            candidates: s.candidates.map(o => ({ id: o.id, style_no: o.style_no, description: o.description || o.style_description })),
+          }));
+      }
+    } catch (e) {
+      console.error('PO AI extraction failed for order', order.id, ':', e.message);
+    }
+  }
+
+  res.json({ slots: getSlots(order), suggestions });
+});
+
+// Applies the PO already on file for order :id onto a different order
+// (:targetId) - same reasoning as routes/shipping.js's worksheet
+// apply-to route (one PO genuinely covering more than one department's
+// order, confirmed rather than auto-applied). PO-only, unlike the generic
+// upload/delete routes above, since that's the only doc type extraction
+// runs against.
+router.post('/orders/:id/submission/sap_po/apply-to/:targetId', blockBuyerWrite, (req, res) => {
+  const source = getOrder(req.params.id);
+  const target = getOrder(req.params.targetId);
+  if (!source || !target) return res.status(404).json({ error: 'Order not found' });
+  const sourceRow = db.prepare("SELECT * FROM order_submission_docs WHERE order_id = ? AND doc_type = 'sap_po'").get(source.id);
+  if (!sourceRow) return res.status(400).json({ error: 'Source order has no PO on file' });
+  const sourcePath = path.join(PRIVATE_DIR, sourceRow.file_path);
+  if (!fs.existsSync(sourcePath)) return res.status(404).json({ error: 'PO file missing on disk' });
+
+  const variant = req.body && req.body.variant || {};
+  const ext = path.extname(sourceRow.file_path);
+  const dir = orderDir(target);
+  const storedName = `sap_po${ext}`;
+  fs.copyFileSync(sourcePath, path.join(dir, storedName));
+  const relPath = path.join(safeSegment(target.style_no, 'style'), safeSegment(target.order_no, 'order' + target.id), storedName);
+
+  db.prepare(`
+    INSERT INTO order_submission_docs (order_id, doc_type, source, file_path, original_filename, uploaded_by)
+    VALUES (?, 'sap_po', 'uploaded', ?, ?, ?)
+    ON CONFLICT(order_id, doc_type) DO UPDATE SET
+      source = 'uploaded', file_path = excluded.file_path,
+      original_filename = excluded.original_filename, uploaded_by = excluded.uploaded_by,
+      created_at = CURRENT_TIMESTAMP
+  `).run(target.id, relPath, sourceRow.original_filename, req.session.user.name);
+  bumpStatusIfNone(target.id);
+
+  db.prepare(`
+    UPDATE orders SET po_extract_label = ?, po_extract_units = ?,
+      po_extract_price = ?, po_extract_dc_date = ?
+    WHERE id = ?
+  `).run(variant.label || null, variant.units || null, variant.unit_price || null, variant.delivery_date || null, target.id);
+  compareOrderDocs(target.id);
+
+  res.json({ slots: getSlots(target) });
 });
 
 router.delete('/orders/:id/submission/:docType', blockBuyerWrite, (req, res) => {
@@ -318,6 +399,14 @@ router.delete('/orders/:id/submission/:docType', blockBuyerWrite, (req, res) => 
   if (row) {
     fs.unlink(path.join(PRIVATE_DIR, row.file_path), () => {});
     db.prepare('DELETE FROM order_submission_docs WHERE id = ?').run(row.id);
+  }
+  if (req.params.docType === 'sap_po') {
+    db.prepare(`
+      UPDATE orders SET po_extract_label = NULL, po_extract_units = NULL,
+        po_extract_price = NULL, po_extract_dc_date = NULL
+      WHERE id = ?
+    `).run(order.id);
+    compareOrderDocs(order.id); // nothing left to compare against - clears any stale flag
   }
   res.json({ slots: getSlots(order) });
 });
