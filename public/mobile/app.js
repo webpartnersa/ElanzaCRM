@@ -387,6 +387,13 @@ function renderFormDetailsSection(){
   const sizeOptions = (state.sizeRanges||[]).map(r => `<option value="${r.id}" ${String(c.size_range_id||'')===String(r.id)?'selected':''}>${esc(r.values.join(' / '))}</option>`).join('');
   return `
     <div class="section">
+      <div class="section-label">Concept Code</div>
+      <div class="field">
+        <input value="${esc(state.form.concept_no||'')}" placeholder="${state.form.isNew?'Leave blank to auto-generate':''}" style="text-transform:uppercase;" oninput="updateFormConceptNo(this.value)"/>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-label">Description <span style="font-weight:400;text-transform:none;">(optional)</span></div>
       <textarea class="desc-input" oninput="updateFormField('description', this.value)">${esc(c.description)}</textarea>
     </div>
@@ -397,13 +404,6 @@ function renderFormDetailsSection(){
         <select id="mf-department" onchange="onFormDeptChange(this.value)">
           ${DEPARTMENTS.map(d => `<option value="${d}" ${c.department===d?'selected':''}>${d}</option>`).join('')}
         </select>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-label">Concept Code</div>
-      <div class="field">
-        <input value="${esc(state.form.concept_no||'')}" placeholder="${state.form.isNew?'Leave blank to auto-generate':''}" style="text-transform:uppercase;" oninput="updateFormConceptNo(this.value)"/>
       </div>
     </div>
 
