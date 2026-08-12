@@ -93,7 +93,7 @@ function setConceptSearch(v){
 
 // ---- Concept drawer (its own overlay, independent of the style drawer) ----
 function blankConceptDraft(){
-  const draft = { id:null, department:DEPARTMENTS[0], description:'', source:'', concept_date: new Date().toISOString().slice(0,7), cost_estimate:'', factory:'', shipping_date:'', size_range_id:'', fabric_code:'', composition:'', weight:'', buyer_rand_target:'', buyer_rsp_target:'', factory_target_price:'', factory_price:'', factory_cost_options:'' };
+  const draft = { id:null, department:DEPARTMENTS[0], description:'', source:'', concept_date: new Date().toISOString().slice(0,7), cost_estimate:'', factory:'Wofeng', shipping_date:'', size_range_id:'', fabric_code:'', composition:'', weight:'', buyer_rand_target:'', buyer_rsp_target:'', factory_target_price:'', factory_price:'', factory_cost_options:'' };
   CONCEPT_DETAIL_FIELDS.forEach(f => { draft[f.key] = ''; });
   return draft;
 }

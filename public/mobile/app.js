@@ -11,7 +11,7 @@ function blankFormConcept(){
     fabric_code:'', composition:'', weight:'',
     wash:'', colour:'', print:'', embroidery_applique:'', topstitching:'', trims:'', styling:'',
     units:'', packing:'', labels:'',
-    factory:'', shipping_date:'', dc_date:'',
+    factory:'Wofeng', shipping_date:'', dc_date:'',
     cost_estimate:'', buyer_rand_target:'', buyer_rsp_target:'', factory_target_price:'', factory_price:'', factory_cost_options:'',
   };
 }
