@@ -1248,7 +1248,7 @@ async function downloadCadFile(){
 function syncConceptDraftFromDom(){
   const d = state.conceptDrawer;
   if (!d) return;
-  const fields = ['department','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
+  const fields = ['concept_no','department','description','source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
     'fabric_code','fabric_prefix','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)];
   fields.forEach(f => {
     const el = document.getElementById('cf-'+f);
