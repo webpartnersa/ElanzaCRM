@@ -528,16 +528,27 @@ function renderStyleRequestComposer(){
   const d = state.drawer;
   const composer = d.composer;
   if (!composer) return '';
-  const contactOpts = (composer.contacts || []).filter(c => c.email).map(c =>
+  const emailContacts = (composer.contacts || []).filter(c => c.email);
+  const contactOpts = emailContacts.map(c =>
     `<option value="${c.email}">${c.first_name} ${c.last_name} - ${c.company || ''}</option>`
+  ).join('');
+  // Same multi-recipient support as the Concept drawer's own composer (see
+  // that one's comment in concepts.js) - "Send to" accepts comma-separated
+  // addresses, these buttons just make adding a second saved contact quicker
+  // than typing their email by hand.
+  const currentEmails = (composer.to || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const addButtons = emailContacts.filter(c => !currentEmails.includes(c.email.toLowerCase())).map(c =>
+    `<button type="button" class="btn btn-ghost btn-sm" onclick="addStyleRequestRecipient('${c.email.replace(/'/g,"\\'")}')">+ ${c.first_name} ${c.last_name}</button>`
   ).join('');
   return `
     <div class="field" style="margin-top:14px;background:var(--line-soft);padding:12px;border-radius:var(--radius);">
       <label>${REQUEST_TYPES[composer.type].en}</label>
       <textarea id="style-request-message" placeholder="What do you need from the factory?" style="margin-top:6px;">${escapeHtml(composer.message||'')}</textarea>
       <label style="margin-top:10px;display:block;">Send to</label>
-      <input id="style-request-to" value="${composer.to || ''}" placeholder="factory@example.com" list="style-request-to-list"/>
+      <input id="style-request-to" value="${composer.to || ''}" placeholder="factory@example.com" list="style-request-to-list" onchange="syncStyleRequestComposerTo(this.value)"/>
       <datalist id="style-request-to-list">${contactOpts}</datalist>
+      <div class="hint" style="margin-top:4px;">Separate multiple addresses with a comma to send to more than one recipient.</div>
+      ${addButtons ? `<div class="row-actions" style="margin-top:8px;flex-wrap:wrap;">${addButtons}</div>` : ''}
       ${composer.matchName
         ? `<div class="hint" style="margin-top:4px;">Matched saved contact: ${composer.matchName}</div>`
         : `<div class="hint" style="margin-top:4px;">No saved Factory contact matched this style's Factory field (${escapeHtml(d.style.factory || '(not set)')}) - pick a saved contact above or type an email. Add factory contacts under Contacts.</div>`}
@@ -546,6 +557,19 @@ function renderStyleRequestComposer(){
         <button class="btn btn-primary" onclick="sendStyleRequestNow()">Send</button>
       </div>
     </div>`;
+}
+function syncStyleRequestComposerTo(value){
+  if (state.drawer && state.drawer.composer) state.drawer.composer.to = value;
+}
+function addStyleRequestRecipient(email){
+  const d = state.drawer;
+  if (!d || !d.composer) return;
+  const el = document.getElementById('style-request-to');
+  const current = (el ? el.value : d.composer.to) || '';
+  const emails = current.split(',').map(s => s.trim()).filter(Boolean);
+  if (!emails.some(e => e.toLowerCase() === email.toLowerCase())) emails.push(email);
+  d.composer.to = emails.join(', ');
+  renderDrawerOnly();
 }
 async function openStyleRequestComposer(type){
   const d = state.drawer;

@@ -633,8 +633,18 @@ function renderRequestComposer(){
   const composer = d.composer;
   if (!composer) return '';
   const isCost = composer.type === 'cost';
-  const contactOpts = (composer.contacts || []).filter(c => c.email).map(c =>
+  const emailContacts = (composer.contacts || []).filter(c => c.email);
+  const contactOpts = emailContacts.map(c =>
     `<option value="${c.email}">${c.first_name} ${c.last_name} - ${c.company || ''}</option>`
+  ).join('');
+  // "Send to" also accepts multiple comma-separated addresses (see
+  // parseRecipients in lib/mailer.js) - these buttons are just a quicker way
+  // to add a second (or third) saved contact than typing their email by
+  // hand, for e.g. cc'ing both a factory's merchandiser and their sample
+  // room on the same request.
+  const currentEmails = (composer.to || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const addButtons = emailContacts.filter(c => !currentEmails.includes(c.email.toLowerCase())).map(c =>
+    `<button type="button" class="btn btn-ghost btn-sm" onclick="addRequestRecipient('${c.email.replace(/'/g,"\\'")}')">+ ${c.first_name} ${c.last_name}</button>`
   ).join('');
   return `
     <div class="field" style="margin-top:14px;background:var(--line-soft);padding:12px;border-radius:var(--radius);">
@@ -643,8 +653,10 @@ function renderRequestComposer(){
         ? `<div class="hint" style="margin:2px 0 0;">Built from this concept's saved Details and Costing fields - save first if you've just made changes.</div>`
         : `<textarea id="cf-request-message" placeholder="What do you need from the factory?" style="margin-top:6px;">${escapeHtml(composer.message||'')}</textarea>`}
       <label style="margin-top:10px;display:block;">Send to</label>
-      <input id="cf-request-to" value="${composer.to || ''}" placeholder="factory@example.com" list="cf-request-to-list"/>
+      <input id="cf-request-to" value="${composer.to || ''}" placeholder="factory@example.com" list="cf-request-to-list" onchange="syncRequestComposerTo(this.value)"/>
       <datalist id="cf-request-to-list">${contactOpts}</datalist>
+      <div class="hint" style="margin-top:4px;">Separate multiple addresses with a comma to send to more than one recipient.</div>
+      ${addButtons ? `<div class="row-actions" style="margin-top:8px;flex-wrap:wrap;">${addButtons}</div>` : ''}
       ${composer.matchName
         ? `<div class="hint" style="margin-top:4px;">Matched saved contact: ${composer.matchName}</div>`
         : `<div class="hint" style="margin-top:4px;">No saved Factory contact matched this concept's Factory field (${escapeHtml(d.concept.factory || '(not set)')}) - pick a saved contact above or type an email. Add factory contacts under Contacts.</div>`}
@@ -654,6 +666,22 @@ function renderRequestComposer(){
         <button class="btn btn-primary" onclick="sendRequestNow()">Send</button>
       </div>
     </div>`;
+}
+// Keeps composer.to in sync with manual edits to the input, so the "+ Add"
+// buttons below it (which read/write composer.to) don't clobber typing done
+// directly in the field between renders.
+function syncRequestComposerTo(value){
+  if (state.conceptDrawer && state.conceptDrawer.composer) state.conceptDrawer.composer.to = value;
+}
+function addRequestRecipient(email){
+  const d = state.conceptDrawer;
+  if (!d || !d.composer) return;
+  const el = document.getElementById('cf-request-to');
+  const current = (el ? el.value : d.composer.to) || '';
+  const emails = current.split(',').map(s => s.trim()).filter(Boolean);
+  if (!emails.some(e => e.toLowerCase() === email.toLowerCase())) emails.push(email);
+  d.composer.to = emails.join(', ');
+  patchConceptDrawerBody();
 }
 async function openRequestComposer(type){
   const d = state.conceptDrawer;

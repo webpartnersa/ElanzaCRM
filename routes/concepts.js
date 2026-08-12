@@ -12,7 +12,7 @@ const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile } = require
 const { translateConceptFields, translateMessage, REQUEST_TYPES, LABELS } = require('../lib/conceptCostingTranslate');
 const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/conceptCostingEmailHtml');
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText } = require('../lib/conceptGenericRequestEmailHtml');
-const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
+const { sendMail, isConfigured: mailIsConfigured, resolveSender, parseRecipients } = require('../lib/mailer');
 
 const router = express.Router();
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -686,10 +686,11 @@ router.post('/:id/send-request', requireAuth, requirePermission('concepts'), asy
   if (user.role === 'buyer') return res.status(403).json({ error: 'Not authorized' });
   if (!mailIsConfigured()) return res.status(500).json({ error: 'Email sending is not configured on the server' });
 
-  const to = (req.body && req.body.to || '').trim();
-  if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+  const recipients = parseRecipients(req.body && req.body.to);
+  if (!recipients.length) {
     return res.status(400).json({ error: 'A valid recipient email is required' });
   }
+  const to = recipients.join(', ');
   const requestType = (req.body && req.body.request_type) || 'cost';
   if (!REQUEST_TYPES[requestType]) return res.status(400).json({ error: 'Invalid request type' });
   const message = (req.body && req.body.message || '').trim();
@@ -738,7 +739,7 @@ router.post('/:id/send-request', requireAuth, requirePermission('concepts'), asy
     }
 
     const { from, replyTo } = resolveSender(user);
-    const result = await sendMail({ to, subject, html, text, from, replyTo });
+    const result = await sendMail({ to: recipients, subject, html, text, from, replyTo });
 
     db.prepare(`
       INSERT INTO concept_requests (concept_id, concept_no, concept_description, request_type, message, sent_to, sent_by_name, subject, html, resend_id)

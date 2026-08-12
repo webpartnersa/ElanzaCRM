@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { db } = require('../db');
 const { requireAuth, hasPermission } = require('../middleware/auth');
-const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
+const { sendMail, isConfigured: mailIsConfigured, resolveSender, parseRecipients } = require('../lib/mailer');
 const { buildReminderEmailHtml, buildReminderPlainText } = require('../lib/conceptGenericRequestEmailHtml');
 
 const router = express.Router();
@@ -94,7 +94,10 @@ router.post('/:id/remind', async (req, res) => {
     const subject = `Reminder: ${row.subject}`;
 
     const { from, replyTo } = resolveSender(user);
-    await sendMail({ to: row.sent_to, subject, html, text, from, replyTo });
+    // sent_to is stored comma-joined for a readable history (see the
+    // send-request routes) - Resend wants a real array for multiple
+    // recipients, not one comma-joined string, so it's split back out here.
+    await sendMail({ to: parseRecipients(row.sent_to), subject, html, text, from, replyTo });
 
     const now = new Date().toISOString();
     db.prepare('UPDATE concept_requests SET reminder_count = reminder_count + 1, last_reminder_at = ? WHERE id = ?')
