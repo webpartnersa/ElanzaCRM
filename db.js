@@ -28,7 +28,7 @@ db.exec(`
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL,           -- 'admin' | 'merchandiser' | 'buyer'
-    retailer TEXT,                -- scoping for buyer role, e.g. 'Pick n Pay'
+    retailer TEXT,                -- scoping for buyer role, e.g. 'PnP' (see RETAILERS in public/js/board.js)
     department TEXT               -- scoping for buyer role, e.g. 'Ladies'
   );
 
@@ -1011,9 +1011,17 @@ function seed() {
       `INSERT INTO users (name,email,password_hash,role,retailer,department) VALUES (?,?,?,?,?,?)`
     );
     insertUser.run('Vicky', 'vicky@elanzas.com', bcrypt.hashSync('uNHav5rtPbhcsP', 10), 'merchandiser', null, null);
-    insertUser.run('Abbey Kilian', 'abbey@pnp.co.za', bcrypt.hashSync('H*yF!bN!j4f#XC', 10), 'buyer', 'Pick n Pay', 'Ladies');
+    insertUser.run('Abbey Kilian', 'abbey@pnp.co.za', bcrypt.hashSync('H*yF!bN!j4f#XC', 10), 'buyer', 'PnP', 'Ladies');
     console.log('Seeded users');
   }
+
+  // One-time correction: an earlier version of the seed above used the full
+  // retailer name 'Pick n Pay' instead of the short code every other part of
+  // the app actually scopes by (see RETAILERS in public/js/board.js) -
+  // styles.retailer, contacts.retailer, and now spec_categories.retailer are
+  // all 'PnP'/'Eagle'/'PEP', so a buyer stuck on the old full name would
+  // never match any of their own retailer's styles or spec categories.
+  db.prepare("UPDATE users SET retailer = 'PnP' WHERE retailer = 'Pick n Pay'").run();
 
   // One-time upgrade path: if this database predates the admin role and no
   // admin exists yet, promote the first merchandiser found so there's

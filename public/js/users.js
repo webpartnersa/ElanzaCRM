@@ -207,7 +207,12 @@ function renderUserFormModal(u){
         </div>
         <div id="uf-buyer-fields" class="${u&&u.role==='buyer'?'':'hidden'}">
           <div class="row2">
-            <div class="field"><label>Retailer</label><input id="uf-retailer" value="${u&&u.retailer?u.retailer:''}" placeholder="e.g. Pick n Pay"/></div>
+            <div class="field">
+              <label>Retailer</label>
+              <select id="uf-retailer">
+                ${RETAILERS.map(r=>`<option value="${r}" ${u&&u.retailer===r?'selected':''}>${r}</option>`).join('')}
+              </select>
+            </div>
             <div class="field"><label>Department</label><input id="uf-department" value="${u&&u.department?u.department:''}" placeholder="e.g. Ladies"/></div>
           </div>
         </div>

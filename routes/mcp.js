@@ -153,7 +153,7 @@ function buildServer() {
     'Search styles by retailer, department, pipeline stage, or a keyword in the description. Requires session_token from identify_user_by_pin.',
     {
       session_token: z.string().optional(),
-      retailer: z.string().optional().describe('e.g. Pick n Pay'),
+      retailer: z.string().optional().describe('e.g. PnP'),
       department: z.string().optional().describe('Ladies, Mens, Kids, or Baby'),
       stage: z.string().optional().describe('brief, doc_sent, costed, worksheet, proceed, or po'),
       keyword: z.string().optional().describe('Text to search for in the description'),
@@ -217,7 +217,7 @@ function buildServer() {
     'Create a new style. The style number is auto-generated from the department prefix (PL/PM/PK/PB) unless you specify one. Requires session_token from identify_user_by_pin.',
     {
       session_token: z.string().optional(),
-      retailer: z.string().describe('e.g. Pick n Pay'),
+      retailer: z.string().describe('e.g. PnP'),
       department: z.enum(['Ladies', 'Mens', 'Kids', 'Baby']),
       buyer: z.string().optional(),
       description: z.string().optional(),
