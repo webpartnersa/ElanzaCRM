@@ -152,7 +152,7 @@ router.get('/:id', requireAuth, requirePermission('styles'), (req, res) => {
 // lands in the same concept_requests table concepts use, just with
 // style_id/style_no/style_description set instead of concept_id/concept_no/
 // concept_description - see db.js's ensureConceptRequestsConceptIdNullable.
-const STYLE_REQUEST_TYPES = { sample: REQUEST_TYPES.sample, pp_sample: REQUEST_TYPES.pp_sample, bulk_sample: REQUEST_TYPES.bulk_sample, fabric_test: REQUEST_TYPES.fabric_test };
+const STYLE_REQUEST_TYPES = { sample: REQUEST_TYPES.sample, fit_sample: REQUEST_TYPES.fit_sample, pp_sample: REQUEST_TYPES.pp_sample, bulk_sample: REQUEST_TYPES.bulk_sample, fabric_test: REQUEST_TYPES.fabric_test };
 
 router.get('/:id/factory-contact', requireAuth, requirePermission('styles'), (req, res) => {
   const user = req.session.user;

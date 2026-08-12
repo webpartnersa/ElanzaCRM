@@ -524,7 +524,7 @@ function buildServer() {
   function findStyleByNo(styleNo) {
     return db.prepare('SELECT * FROM styles WHERE style_no = ? COLLATE NOCASE').get((styleNo || '').trim());
   }
-  const STYLE_REQUEST_TYPES = ['sample', 'pp_sample', 'bulk_sample', 'fabric_test'];
+  const STYLE_REQUEST_TYPES = ['sample', 'fit_sample', 'pp_sample', 'bulk_sample', 'fabric_test'];
   function summarizeRequest(r) {
     return {
       id: r.id, subject_type: r.concept_id ? 'concept' : 'style',
@@ -542,7 +542,7 @@ function buildServer() {
     {
       session_token: z.string().optional(),
       status: z.enum(['awaiting', 'received']).optional(),
-      request_type: z.enum(['cost', 'sample', 'pp_sample', 'bulk_sample', 'fabric_test']).optional(),
+      request_type: z.enum(['cost', 'sample', 'fit_sample', 'pp_sample', 'bulk_sample', 'fabric_test']).optional(),
       concept_no: z.string().optional(),
       style_no: z.string().optional(),
     },
@@ -580,7 +580,7 @@ function buildServer() {
       session_token: z.string().optional(),
       concept_no: z.string().optional(),
       style_no: z.string().optional(),
-      request_type: z.enum(['cost', 'sample', 'pp_sample', 'bulk_sample', 'fabric_test']),
+      request_type: z.enum(['cost', 'sample', 'fit_sample', 'pp_sample', 'bulk_sample', 'fabric_test']),
       to: z.string().describe('Recipient email address'),
       message: z.string().optional().describe('Required for every type except a concept cost request - what you need from the factory. Cost requests build their content from the concept\'s own saved fields instead.'),
     },

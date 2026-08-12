@@ -522,7 +522,7 @@ function updateStyleMargin(){
 // stage, before a style even exists - see routes/styles.js's send-request
 // route for the enforced type list). Backed by the same concept_requests
 // table concepts use, just keyed by style_id instead of concept_id.
-const STYLE_REQUEST_TYPES = ['sample', 'pp_sample', 'bulk_sample', 'fabric_test'];
+const STYLE_REQUEST_TYPES = ['sample', 'fit_sample', 'pp_sample', 'bulk_sample', 'fabric_test'];
 
 function renderStyleRequestComposer(){
   const d = state.drawer;

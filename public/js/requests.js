@@ -15,6 +15,7 @@
 const REQUEST_TYPES = {
   cost: { en: 'Costing Request' /* zh: '询价单' */ },
   sample: { en: 'Sample Request' /* zh: '样品申请' */ },
+  fit_sample: { en: 'Fit Sample Request' /* zh: '试身样申请' */ },
   pp_sample: { en: 'PP Sample Request' /* zh: 'PP样衣申请' */ },
   bulk_sample: { en: 'Bulk Sample Request' /* zh: '大货样衣申请' */ },
   fabric_test: { en: 'Fabric Test Report Request' /* zh: '面料测试报告申请' */ },
