@@ -173,20 +173,25 @@ CREATE TABLE IF NOT EXISTS concepts (
   );
 
   -- Extra fabric slots for a multi-piece concept (e.g. a dungaree + t-shirt
-  -- set needs two fabrics). The concept's own fabric_code/composition
-  -- columns remain the first/primary fabric - this table only holds any
-  -- fabric beyond that one, added via "+ Add Fabric" in the drawer. prefix
-  -- labels which piece a slot belongs to (e.g. "T-Shirt") so the combined
-  -- composition text can be built as "Dungaree: ... / T-Shirt: ...".
-  -- composition is snapshotted here at pick time (same as the concept's own
-  -- composition field is), so it stays editable/frozen rather than drifting
-  -- if the fabric's own test-report composition changes later.
+  -- set needs two fabrics). The concept's own fabric_code/composition/
+  -- weight columns remain the first/primary fabric, kept as its own
+  -- individually-visible values (not merged into anything live) - this
+  -- table only holds any fabric beyond that one, added via "+ Add Fabric"
+  -- in the drawer, each with its own composition/weight shown separately
+  -- for the same reason. prefix labels which piece a slot belongs to (e.g.
+  -- "T-Shirt") so a combined "Dungaree: ... / T-Shirt: ..." string can be
+  -- built wherever one's actually needed (export, etc), without the app
+  -- itself ever merging the fields together in the UI or the database.
+  -- composition/weight are snapshotted here at pick time (same as the
+  -- concept's own fields are), so they stay editable/frozen rather than
+  -- drifting if the fabric's own test-report values change later.
   CREATE TABLE IF NOT EXISTS concept_fabrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     concept_id INTEGER NOT NULL REFERENCES concepts(id),
     prefix TEXT,
     fabric_code TEXT,
     composition TEXT,
+    weight TEXT,
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
@@ -720,6 +725,7 @@ ensureColumn('styles', 'factory_cost_options', 'TEXT');
 // "Dungaree: ... / T-Shirt: ..." rather than leaving the first piece
 // unlabeled.
 ensureColumn('concepts', 'fabric_prefix', 'TEXT');
+ensureColumn('concept_fabrics', 'weight', 'TEXT');
 
 // Shipping Schedule drawer fields beyond the core columns above - kept as a
 // non-destructive extension rather than baked into the initial CREATE TABLE

@@ -760,61 +760,31 @@ function onConceptFabricPicked(code){
     d.concept.composition = fab.composition || '';
     d.concept.weight = fab.weight || '';
   }
-  if ((d.extraFabrics||[]).length) recomputeCombinedComposition();
   patchConceptDrawerBody();
 }
 
 // A multi-piece concept (e.g. a dungaree + t-shirt set) needs more than one
 // fabric, each on its own piece - these are the "+ Add Fabric" slots beyond
-// the concept's own primary fabric_code/composition. Combined Composition
-// is rebuilt from scratch on every relevant change (same "auto insert,
-// then it's just text" trade-off the single-fabric autofill already makes)
-// by pulling each slot's composition fresh from state.fabrics rather than
-// from the concept's own (possibly already-combined) Composition field, to
-// avoid nesting an old combined string inside a new one.
-function recomputeCombinedComposition(){
-  const d = state.conceptDrawer;
-  const extraFabrics = d.extraFabrics || [];
-  const parts = [];
-  const primaryFab = (state.fabrics||[]).find(f=>f.code===d.concept.fabric_code);
-  if (primaryFab && primaryFab.composition) {
-    // Once the last extra fabric is removed, the prefix is meaningless
-    // again (that field disappears from the form) - drop it from the text
-    // even if fabric_prefix still has a leftover value sitting in state.
-    const prefix = extraFabrics.length ? (d.concept.fabric_prefix||'').trim() : '';
-    parts.push(prefix ? `${prefix}: ${primaryFab.composition}` : primaryFab.composition);
-  }
-  extraFabrics.forEach(ef => {
-    if (ef.composition) {
-      const prefix = (ef.prefix||'').trim();
-      parts.push(prefix ? `${prefix}: ${ef.composition}` : ef.composition);
-    }
-  });
-  d.concept.composition = parts.join(' / ');
-}
-
-// Keeps any prefixes already typed into other fabric-slot rows from being
-// lost when patchConceptDrawerBody() replaces the whole body's innerHTML -
-// same reasoning as syncConceptDraftFromDom() for the rest of the form.
+// the concept's own primary fabric_code/composition/weight. Each slot keeps
+// its own composition/weight, visible individually rather than merged into
+// one field here - a combined "Dungaree: ... / T-Shirt: ..." string only
+// gets built downstream (export, etc), never live in the drawer or in the
+// database, so each piece stays easy to read and edit on its own.
 function syncExtraFabricsFromDom(){
   (state.conceptDrawer.extraFabrics||[]).forEach((ef,i) => {
-    const el = document.getElementById('ef-prefix-'+i);
-    if (el) ef.prefix = el.value;
+    const prefixEl = document.getElementById('ef-prefix-'+i);
+    const compEl = document.getElementById('ef-composition-'+i);
+    const weightEl = document.getElementById('ef-weight-'+i);
+    if (prefixEl) ef.prefix = prefixEl.value;
+    if (compEl) ef.composition = compEl.value;
+    if (weightEl) ef.weight = weightEl.value;
   });
-}
-
-function onConceptFabricPrefixChanged(){
-  syncConceptDraftFromDom();
-  syncExtraFabricsFromDom();
-  recomputeCombinedComposition();
-  patchConceptDrawerBody();
 }
 
 function addExtraFabric(){
   syncConceptDraftFromDom();
   syncExtraFabricsFromDom();
-  state.conceptDrawer.extraFabrics = [...(state.conceptDrawer.extraFabrics||[]), { prefix:'', fabric_code:'', composition:'' }];
-  recomputeCombinedComposition();
+  state.conceptDrawer.extraFabrics = [...(state.conceptDrawer.extraFabrics||[]), { prefix:'', fabric_code:'', composition:'', weight:'' }];
   patchConceptDrawerBody();
 }
 
@@ -822,7 +792,6 @@ function removeExtraFabric(i){
   syncConceptDraftFromDom();
   syncExtraFabricsFromDom();
   state.conceptDrawer.extraFabrics.splice(i, 1);
-  recomputeCombinedComposition();
   patchConceptDrawerBody();
 }
 
@@ -834,14 +803,7 @@ function onExtraFabricPicked(i, code){
   ef.fabric_code = code;
   const fab = (state.fabrics||[]).find(f=>f.code===code);
   ef.composition = fab ? (fab.composition||'') : '';
-  recomputeCombinedComposition();
-  patchConceptDrawerBody();
-}
-
-function onExtraFabricPrefixChanged(i){
-  syncConceptDraftFromDom();
-  syncExtraFabricsFromDom();
-  recomputeCombinedComposition();
+  ef.weight = fab ? (fab.weight||'') : '';
   patchConceptDrawerBody();
 }
 
@@ -934,27 +896,33 @@ function renderConceptDrawerBody(){
           ${!isNew && canEdit ? `<a href="javascript:void(0)" onclick="addExtraFabric()" style="font-size:12px; text-transform:none;">+ Add Fabric</a>` : ''}
         </div>
         <div style="display:flex; gap:8px; align-items:center;">
-          ${fabricSlots.length ? `<input id="cf-fabric_prefix" placeholder="Piece (e.g. Dungaree)" value="${c.fabric_prefix||''}" onchange="onConceptFabricPrefixChanged()" style="width:140px;" ${canEdit?'':'disabled'}/>` : ''}
+          ${fabricSlots.length ? `<input id="cf-fabric_prefix" placeholder="Piece (e.g. Dungaree)" value="${c.fabric_prefix||''}" style="width:140px;" ${canEdit?'':'disabled'}/>` : ''}
           <select id="cf-fabric_code" onchange="onConceptFabricPicked(this.value)" ${canEdit?'':'disabled'} style="flex:1;">
             <option value="" ${!c.fabric_code?'selected':''}>-</option>
             ${(state.fabrics||[]).map(f=>`<option value="${f.code}" ${c.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
           </select>
         </div>
-        ${fabricSlots.map((ef,i)=>`
-          <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
-            <input id="ef-prefix-${i}" placeholder="Piece (e.g. T-Shirt)" value="${ef.prefix||''}" onchange="onExtraFabricPrefixChanged(${i})" style="width:140px;" ${canEdit?'':'disabled'}/>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Composition</label><input id="cf-composition" value="${c.composition||''}" ${canEdit?'':'disabled'}/></div>
+        <div class="field"><label>Weight (oz)</label><input id="cf-weight" value="${c.weight||''}" ${canEdit?'':'disabled'}/></div>
+      </div>
+      ${fabricSlots.map((ef,i)=>`
+        <div class="field" style="border:1px solid var(--line); border-radius:6px; padding:10px; margin-top:6px;">
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="ef-prefix-${i}" placeholder="Piece (e.g. T-Shirt)" value="${ef.prefix||''}" style="width:140px;" ${canEdit?'':'disabled'}/>
             <select id="ef-fabric-${i}" onchange="onExtraFabricPicked(${i}, this.value)" ${canEdit?'':'disabled'} style="flex:1;">
               <option value="" ${!ef.fabric_code?'selected':''}>-</option>
               ${(state.fabrics||[]).map(f=>`<option value="${f.code}" ${ef.fabric_code===f.code?'selected':''}>${f.code}</option>`).join('')}
             </select>
             ${canEdit ? `<button type="button" class="btn btn-ghost btn-sm" onclick="removeExtraFabric(${i})" title="Remove this fabric">&times;</button>` : ''}
           </div>
-        `).join('')}
-      </div>
-      <div class="row2">
-        <div class="field"><label>Composition</label><input id="cf-composition" value="${c.composition||''}" ${canEdit?'':'disabled'}/></div>
-        <div class="field"><label>Weight (oz)</label><input id="cf-weight" value="${c.weight||''}" ${canEdit?'':'disabled'}/></div>
-      </div>
+          <div class="row2" style="margin-top:8px;">
+            <div class="field"><label>Composition</label><input id="ef-composition-${i}" value="${ef.composition||''}" ${canEdit?'':'disabled'}/></div>
+            <div class="field"><label>Weight (oz)</label><input id="ef-weight-${i}" value="${ef.weight||''}" ${canEdit?'':'disabled'}/></div>
+          </div>
+        </div>
+      `).join('')}
       ${renderConceptDetailField('wash', canEdit)}
       ${renderConceptDetailField('colour', canEdit)}
       ${renderConceptDetailField('print', canEdit)}
@@ -1370,15 +1338,18 @@ async function saveConcept(){
     });
     // Extra fabric slots for a multi-piece set (see "+ Add Fabric") - read
     // straight from the DOM like every other field above, not from state,
-    // since a prefix edit only lands in state.conceptDrawer.extraFabrics on
-    // blur (onchange), and Save can be clicked before that fires.
+    // since edits there only land in state.conceptDrawer.extraFabrics on a
+    // fabric pick or an add/remove, and Save can be clicked before that.
     body.fabrics = (state.conceptDrawer.extraFabrics||[]).map((ef, i) => {
       const prefixEl = document.getElementById('ef-prefix-'+i);
       const fabricEl = document.getElementById('ef-fabric-'+i);
+      const compEl = document.getElementById('ef-composition-'+i);
+      const weightEl = document.getElementById('ef-weight-'+i);
       return {
         prefix: prefixEl ? prefixEl.value : (ef.prefix||''),
         fabric_code: fabricEl ? fabricEl.value : (ef.fabric_code||''),
-        composition: ef.composition || '',
+        composition: compEl ? compEl.value : (ef.composition||''),
+        weight: weightEl ? weightEl.value : (ef.weight||''),
       };
     });
     await api('/api/concepts/'+c.id, { method:'PUT', body: JSON.stringify(body) });

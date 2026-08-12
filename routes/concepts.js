@@ -303,13 +303,14 @@ router.put('/:id', requireAuth, (req, res) => {
   if (fabricsProvided) {
     const fabrics = Array.isArray(req.body.fabrics) ? req.body.fabrics : [];
     db.prepare('DELETE FROM concept_fabrics WHERE concept_id = ?').run(concept.id);
-    const insertFabric = db.prepare('INSERT INTO concept_fabrics (concept_id, prefix, fabric_code, composition, sort_order) VALUES (?,?,?,?,?)');
+    const insertFabric = db.prepare('INSERT INTO concept_fabrics (concept_id, prefix, fabric_code, composition, weight, sort_order) VALUES (?,?,?,?,?,?)');
     fabrics.forEach((f, i) => {
       insertFabric.run(
         concept.id,
         (f.prefix || '').toString().trim() || null,
         (f.fabric_code || '').toString().trim() || null,
         (f.composition || '').toString().trim() || null,
+        (f.weight || '').toString().trim() || null,
         i
       );
     });
