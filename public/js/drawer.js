@@ -785,11 +785,14 @@ function renderMeasurementsTab(s, canEdit){
 // only committing (useStyleSpecCategory) once a leaf is actually reached -
 // picking through the chain here has a real backend side effect (copying
 // the bank onto the style), unlike Concepts where it's just saved with the
-// rest of the concept on its own Save button.
+// rest of the concept on its own Save button. Unlike Concepts though, a
+// style always has a real retailer (styles.retailer, required), so this one
+// does filter by it - defaults to the style's own retailer/department but,
+// same as those, is browsable to a different one while picking.
 function renderStyleSpecPicker(s, canEdit){
   if (!canEdit) return `<div class="hint">No spec category set for this style yet.</div>`;
-  const picking = state.drawer.specPicking || { department: s.department, chain: [] };
-  const nodes = (state.specCategories||[]).filter(n => n.department === picking.department);
+  const picking = state.drawer.specPicking || { retailer: s.retailer, department: s.department, chain: [] };
+  const nodes = (state.specCategories||[]).filter(n => n.department === picking.department && n.retailer === picking.retailer);
   const selects = [];
   let parentId = null, level = 0;
   while (true) {
@@ -807,26 +810,40 @@ function renderStyleSpecPicker(s, canEdit){
   const isLeaf = leafId && !nodes.some(n=>n.parent_id===Number(leafId));
   return `
     <div class="hint">${s.spec_category_id ? "Picking a different category replaces this style's measurement sheet and clears any fits already recorded." : "Pick this style's spec category to load its measurement bank."}</div>
-    <div class="field" style="margin-top:10px;">
-      <label>Department</label>
-      <select onchange="onStyleSpecDeptChange(this.value)">
-        ${DEPARTMENTS.map(d=>`<option value="${d}" ${picking.department===d?'selected':''}>${d}</option>`).join('')}
-      </select>
+    <div class="row2" style="margin-top:10px;">
+      <div class="field">
+        <label>Retailer</label>
+        <select onchange="onStyleSpecRetailerChange(this.value)">
+          ${RETAILERS.map(r=>`<option value="${r}" ${picking.retailer===r?'selected':''}>${r}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>Department</label>
+        <select onchange="onStyleSpecDeptChange(this.value)">
+          ${DEPARTMENTS.map(d=>`<option value="${d}" ${picking.department===d?'selected':''}>${d}</option>`).join('')}
+        </select>
+      </div>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">${selects.join('')}</div>
-    ${!nodes.length ? `<div class="hint" style="margin-top:8px;">No spec categories set up yet for ${picking.department} - <a href="javascript:void(0)" onclick="openSpecManager()">manage spec hierarchy</a>.</div>` : ''}
+    ${!nodes.length ? `<div class="hint" style="margin-top:8px;">No spec categories set up yet for ${picking.retailer} / ${picking.department} - <a href="javascript:void(0)" onclick="openSpecManager()">manage spec hierarchy</a>.</div>` : ''}
     <div class="row-actions" style="margin-top:14px;">
       ${isLeaf ? `<button class="btn btn-primary btn-sm" onclick="useStyleSpecCategory(${leafId})">Use this spec</button>` : ''}
       ${s.spec_category_id ? `<button class="btn btn-ghost btn-sm" onclick="cancelStyleSpecPicking()">Cancel</button>` : ''}
     </div>
   `;
 }
+function onStyleSpecRetailerChange(retailer){
+  const picking = state.drawer.specPicking || { retailer: state.drawer.style.retailer, department: state.drawer.style.department, chain: [] };
+  state.drawer.specPicking = { retailer, department: picking.department, chain: [] };
+  renderDrawerOnly();
+}
 function onStyleSpecDeptChange(dept){
-  state.drawer.specPicking = { department: dept, chain: [] };
+  const picking = state.drawer.specPicking || { retailer: state.drawer.style.retailer, department: state.drawer.style.department, chain: [] };
+  state.drawer.specPicking = { retailer: picking.retailer, department: dept, chain: [] };
   renderDrawerOnly();
 }
 function onStyleSpecPickLevel(level, value){
-  const picking = state.drawer.specPicking || { department: state.drawer.style.department, chain: [] };
+  const picking = state.drawer.specPicking || { retailer: state.drawer.style.retailer, department: state.drawer.style.department, chain: [] };
   picking.chain = picking.chain.slice(0, level);
   if (value) picking.chain.push(Number(value));
   state.drawer.specPicking = picking;
@@ -837,7 +854,7 @@ function cancelStyleSpecPicking(){
   renderDrawerOnly();
 }
 function openStyleSpecPicking(){
-  state.drawer.specPicking = { department: state.drawer.style.department, chain: [] };
+  state.drawer.specPicking = { retailer: state.drawer.style.retailer, department: state.drawer.style.department, chain: [] };
   renderDrawerOnly();
 }
 

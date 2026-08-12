@@ -727,6 +727,20 @@ ensureColumn('styles', 'factory_cost_options', 'TEXT');
 ensureColumn('concepts', 'fabric_prefix', 'TEXT');
 ensureColumn('concept_fabrics', 'weight', 'TEXT');
 
+// Each retailer specs a style differently, so the spec hierarchy (see
+// spec_categories above) needs to be split per retailer too - a root
+// category (and everything under it, since children inherit their root's
+// retailer the same way they already inherit its department) now belongs
+// to one retailer. Concepts still pick a spec category without knowing
+// their retailer yet (that's only fixed once a concept becomes a style),
+// so the Concepts drawer's own picker stays retailer-agnostic by design -
+// only the Style drawer's picker and the Manage Spec Hierarchy admin
+// screen actually filter by retailer. Existing categories (all created
+// before this column existed) are backfilled onto 'PnP', the only
+// retailer in use so far - see RETAILERS in public/js/board.js.
+ensureColumn('spec_categories', 'retailer', 'TEXT');
+db.prepare("UPDATE spec_categories SET retailer = 'PnP' WHERE retailer IS NULL").run();
+
 // Shipping Schedule drawer fields beyond the core columns above - kept as a
 // non-destructive extension rather than baked into the initial CREATE TABLE
 // so the base schema stays readable. All free-text like the rest of the

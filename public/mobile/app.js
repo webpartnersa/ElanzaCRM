@@ -1,4 +1,5 @@
 const DEPARTMENTS = ['Ladies','Mens','Younger Boys','Older Boys','Younger Girls','Older Girls','Babywear'];
+const RETAILERS = ['PnP','Eagle','PEP'];
 
 // Every editable concept field, defaulted blank - mirrors public/js/concepts.js's
 // blankConceptDraft() so mobile create/edit carries the exact same field set as
@@ -534,7 +535,7 @@ function renderFormSpecSelector(department, selectedId){
       <div class="field" style="margin-top:${level ? 10 : 0}px;">
         <select onchange="onFormSpecLevelChange(${level}, this.value)">
           <option value="">Select...</option>
-          ${options.map(o => `<option value="${o.id}" ${String(chosen)===String(o.id)?'selected':''}>${esc(o.name)}</option>`).join('')}
+          ${options.map(o => `<option value="${o.id}" ${String(chosen)===String(o.id)?'selected':''}>${esc(o.name)}${level===0?' ('+esc(o.retailer)+')':''}</option>`).join('')}
         </select>
       </div>
     `);
@@ -1095,8 +1096,8 @@ function renderLightbox(){
 // Mirrors public/js/specCategories.js's manager drawer, as its own screen.
 
 function renderSpecAdmin(){
-  const a = state.specAdmin || { department: DEPARTMENTS[0] };
-  const nodes = (state.specCategories||[]).filter(n => n.department === a.department);
+  const a = state.specAdmin || { retailer: RETAILERS[0], department: DEPARTMENTS[0] };
+  const nodes = (state.specCategories||[]).filter(n => n.department === a.department && n.retailer === a.retailer);
   return `
   <div class="topbar">
     <button class="back-btn" onclick="closeSpecAdmin()">${ICONS.back}</button>
@@ -1105,11 +1106,14 @@ function renderSpecAdmin(){
   </div>
   <div class="form-scroll">
     <div class="chip-grid">
+      ${RETAILERS.map(r => `<button class="chip ${a.retailer===r?'selected':''}" onclick="setSpecAdminRetailer('${r}')">${r}</button>`).join('')}
+    </div>
+    <div class="chip-grid" style="margin-top:8px;">
       ${DEPARTMENTS.map(d => `<button class="chip ${a.department===d?'selected':''}" onclick="setSpecAdminDept('${d}')">${d}</button>`).join('')}
     </div>
     <div class="section" style="margin-top:18px;">
-      ${nodes.length ? renderSpecAdminTree(nodes, null, 0) : `<div class="section-hint">No spec categories yet for ${esc(a.department)}.</div>`}
-      <button class="btn-block ghost" style="margin-top:14px;" onclick="addSpecRootMobile('${esc(a.department)}')">+ Add top-level category</button>
+      ${nodes.length ? renderSpecAdminTree(nodes, null, 0) : `<div class="section-hint">No spec categories yet for ${esc(a.retailer)} / ${esc(a.department)}.</div>`}
+      <button class="btn-block ghost" style="margin-top:14px;" onclick="addSpecRootMobile('${esc(a.retailer)}','${esc(a.department)}')">+ Add top-level category</button>
     </div>
   </div>`;
 }
@@ -1131,11 +1135,12 @@ function renderSpecAdminTree(nodes, parentId, depth){
   </div>`;
 }
 function setSpecAdminDept(d){ state.specAdmin.department = d; render(); }
-async function addSpecRootMobile(department){
-  const name = prompt(`New top-level category under ${department}:`);
+function setSpecAdminRetailer(r){ state.specAdmin.retailer = r; render(); }
+async function addSpecRootMobile(retailer, department){
+  const name = prompt(`New top-level category under ${retailer} / ${department}:`);
   if (!name || !name.trim()) return;
   try {
-    const res = await fetch('/api/spec-categories', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ department, name: name.trim() }) });
+    const res = await fetch('/api/spec-categories', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ retailer, department, name: name.trim() }) });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not add category');
     state.specCategories.push(data.category);
@@ -1180,7 +1185,7 @@ async function deleteSpecMobile(id){
   } catch(e) { showToast(e.message); }
 }
 function openSpecAdmin(department){
-  state.specAdmin = { department: department || DEPARTMENTS[0] };
+  state.specAdmin = { retailer: RETAILERS[0], department: department || DEPARTMENTS[0] };
   pushScreen('spec-admin');
   state.screen = 'specAdmin';
   render();
@@ -1425,7 +1430,7 @@ function applyScreenFromHash(hash){
     if (state.lastCreated) { state.screen = 'success'; render(); }
     else { history.back(); } // stale success state (already reset) - just keep going back
   } else if (hash === 'spec-admin') {
-    if (!state.specAdmin) state.specAdmin = { department: DEPARTMENTS[0] };
+    if (!state.specAdmin) state.specAdmin = { retailer: RETAILERS[0], department: DEPARTMENTS[0] };
     state.screen = 'specAdmin';
     render();
   } else if (hash === 'size-admin') {

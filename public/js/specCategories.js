@@ -12,11 +12,12 @@ async function loadSpecCategories(){
 }
 
 function openSpecManager(){
-  state.specManager = { department: (state.conceptDrawer && state.conceptDrawer.concept.department) || DEPARTMENTS[0], pomBankCategoryId: null, poms: null };
+  state.specManager = { retailer: RETAILERS[0], department: (state.conceptDrawer && state.conceptDrawer.concept.department) || DEPARTMENTS[0], pomBankCategoryId: null, poms: null };
   render();
 }
 function closeSpecManager(){ state.specManager = null; render(); }
 function setSpecManagerDept(d){ state.specManager.department = d; render(); }
+function setSpecManagerRetailer(r){ state.specManager.retailer = r; render(); }
 
 // Recursive - depth just controls indent. Each node gets add-child/rename/
 // delete inline, via prompt()/confirm() (same lightweight pattern already
@@ -53,7 +54,7 @@ function renderSpecManagerHost(){
   if (m.pomBankCategoryId) {
     return `<div class="overlay open" onclick="closeSpecManager()"></div><div class="drawer open">${renderPomBankHost()}</div>`;
   }
-  const nodes = (state.specCategories||[]).filter(n => n.department === m.department);
+  const nodes = (state.specCategories||[]).filter(n => n.department === m.department && n.retailer === m.retailer);
   return `
     <div class="overlay open" onclick="closeSpecManager()"></div>
     <div class="drawer open">
@@ -62,14 +63,22 @@ function renderSpecManagerHost(){
         <button class="drawer-close" onclick="closeSpecManager()">&times;</button>
       </div>
       <div class="drawer-body">
-        <div class="field">
-          <label>Department</label>
-          <select onchange="setSpecManagerDept(this.value)">
-            ${DEPARTMENTS.map(d=>`<option value="${d}" ${m.department===d?'selected':''}>${d}</option>`).join('')}
-          </select>
+        <div class="row2">
+          <div class="field">
+            <label>Retailer</label>
+            <select onchange="setSpecManagerRetailer(this.value)">
+              ${RETAILERS.map(r=>`<option value="${r}" ${m.retailer===r?'selected':''}>${r}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>Department</label>
+            <select onchange="setSpecManagerDept(this.value)">
+              ${DEPARTMENTS.map(d=>`<option value="${d}" ${m.department===d?'selected':''}>${d}</option>`).join('')}
+            </select>
+          </div>
         </div>
-        ${nodes.length ? renderSpecTree(nodes, null, 0) : `<div class="hint">No spec categories yet for ${m.department}.</div>`}
-        <button class="btn btn-ghost btn-sm" style="margin-top:12px;" onclick="addSpecRootCategory('${m.department}')">+ Add top-level category</button>
+        ${nodes.length ? renderSpecTree(nodes, null, 0) : `<div class="hint">No spec categories yet for ${m.retailer} / ${m.department}.</div>`}
+        <button class="btn btn-ghost btn-sm" style="margin-top:12px;" onclick="addSpecRootCategory('${m.retailer}','${m.department}')">+ Add top-level category</button>
       </div>
     </div>`;
 }
@@ -175,10 +184,10 @@ function renderPomBankHost(){
     </div>`;
 }
 
-function addSpecRootCategory(department){
-  const name = prompt(`New top-level category under ${department}:`);
+function addSpecRootCategory(retailer, department){
+  const name = prompt(`New top-level category under ${retailer} / ${department}:`);
   if (!name || !name.trim()) return;
-  api('/api/spec-categories', { method:'POST', body: JSON.stringify({ department, name: name.trim() }) })
+  api('/api/spec-categories', { method:'POST', body: JSON.stringify({ retailer, department, name: name.trim() }) })
     .then(loadSpecCategories)
     .catch(e => toast(e.message));
 }
@@ -212,6 +221,14 @@ function deleteSpecCategory(id){
 // once a leaf (no children) is reached. `selectedId` is the deepest node
 // currently chosen (state.conceptDrawer.specCategoryId); onSpecLevelChange
 // truncates/extends that chain as the user picks through it.
+//
+// A concept doesn't know its retailer yet (that's only fixed once it
+// becomes a style - see the Style drawer's own separate spec picker in
+// drawer.js, which does filter by retailer), so this deliberately shows
+// every retailer's categories for the department together. Root-level
+// options are labeled with their retailer so, now that the hierarchy is
+// split per retailer, two retailers both having e.g. "Denim" doesn't read
+// as one ambiguous duplicate entry.
 function renderSpecSelector(department, selectedId){
   const nodes = (state.specCategories||[]).filter(n => n.department === department);
   if (!nodes.length) return `<div class="hint">No spec categories set up yet for ${department} - <a href="javascript:void(0)" onclick="openSpecManager()">manage spec hierarchy</a>.</div>`;
@@ -235,7 +252,7 @@ function renderSpecSelector(department, selectedId){
     selects.push(`
       <select onchange="onSpecLevelChange(${level}, this.value)">
         <option value="">Select...</option>
-        ${options.map(o=>`<option value="${o.id}" ${String(chosen)===String(o.id)?'selected':''}>${o.name}</option>`).join('')}
+        ${options.map(o=>`<option value="${o.id}" ${String(chosen)===String(o.id)?'selected':''}>${o.name}${level===0?' ('+o.retailer+')':''}</option>`).join('')}
       </select>
     `);
     if (!chosen) break;

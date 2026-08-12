@@ -40,21 +40,24 @@ router.post('/', blockBuyerWrite, (req, res) => {
   const { name, parent_id } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'A category name is required' });
 
-  let department;
+  let department, retailer;
   if (parent_id) {
     const parent = db.prepare('SELECT * FROM spec_categories WHERE id = ?').get(parent_id);
     if (!parent) return res.status(404).json({ error: 'Parent category not found' });
-    department = parent.department; // children always inherit the root's department
+    department = parent.department; // children always inherit the root's department...
+    retailer = parent.retailer; // ...and retailer, same reasoning.
   } else {
     department = (req.body.department || '').trim();
     if (!department) return res.status(400).json({ error: 'A department is required for a top-level category' });
+    retailer = (req.body.retailer || '').trim();
+    if (!retailer) return res.status(400).json({ error: 'A retailer is required for a top-level category' });
   }
 
   const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM spec_categories WHERE parent_id IS ?').get(parent_id || null);
   const info = db.prepare(`
-    INSERT INTO spec_categories (department, parent_id, name, sort_order)
-    VALUES (?,?,?,?)
-  `).run(department, parent_id || null, name.trim(), (maxOrder.m || 0) + 1);
+    INSERT INTO spec_categories (department, retailer, parent_id, name, sort_order)
+    VALUES (?,?,?,?,?)
+  `).run(department, retailer, parent_id || null, name.trim(), (maxOrder.m || 0) + 1);
   const created = db.prepare('SELECT * FROM spec_categories WHERE id = ?').get(info.lastInsertRowid);
   res.json({ category: created });
 });
