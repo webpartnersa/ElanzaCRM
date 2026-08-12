@@ -5,6 +5,14 @@ const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '15mb' }));
+// The mobile PWA (installed to a phone's home screen) has no version/hash
+// in its script tag (see public/mobile/index.html) and no cache-busting
+// scheme at all, so a phone browser can hang onto a stale app.js/index.html
+// indefinitely after a deploy - a real recurring problem, not one-off.
+// no-cache (not no-store) still lets the browser cache the file, it just
+// forces a revalidation request every time rather than trusting a stale
+// local copy, so this doesn't add real load for what's already a small file.
+app.use('/mobile', (req, res, next) => { res.set('Cache-Control', 'no-cache'); next(); });
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
