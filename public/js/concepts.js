@@ -911,12 +911,10 @@ function renderConceptDrawerBody(){
         <select id="cf-department" ${canEdit?'':'disabled'} onchange="onConceptDeptChange(this.value)">${deptOptions}</select>
         ${!isNew ? `<div class="hint" style="margin-top:4px;">Changing this reassigns the concept code (currently ${c.concept_no}) to match the new department.</div>` : ''}
       </div>
-      ${!isNew ? `
-        <div class="field">
-          <label>Concept Code</label>
-          <input id="cf-concept_no" value="${c.concept_no}" ${canEdit?'':'disabled'} style="text-transform:uppercase;"/>
-        </div>
-      ` : ''}
+      <div class="field">
+        <label>Concept Code</label>
+        <input id="cf-concept_no" value="${c.concept_no||''}" placeholder="${isNew?'Leave blank to auto-generate':''}" ${canEdit?'':'disabled'} style="text-transform:uppercase;"/>
+      </div>
       <div class="field"><label>Description</label><textarea id="cf-description" ${canEdit?'':'disabled'}>${c.description||''}</textarea></div>
       <div class="field">
         <div style="display:flex; justify-content:space-between; align-items:baseline;">
@@ -1328,6 +1326,7 @@ async function saveConcept(){
       // photos depending on timing.
       const formData = new FormData();
       formData.append('department', department);
+      formData.append('concept_no', document.getElementById('cf-concept_no').value);
       formData.append('description', document.getElementById('cf-description').value);
       ['source','concept_date','cost_estimate','factory','shipping_date','size_range_id',
        'fabric_code','composition','weight','buyer_rand_target','buyer_rsp_target','factory_target_price','factory_price','factory_cost_options', ...CONCEPT_DETAIL_FIELDS.map(f=>f.key)].forEach(f => {

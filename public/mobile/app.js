@@ -341,6 +341,13 @@ function formTextareaField(key, label){
 function updateFormField(key, value){
   if (state.form) state.form.concept[key] = value;
 }
+// concept_no lives at the top level of state.form (not under .concept, see
+// blankFormState) - a custom code typed in here at creation is sent
+// straight through to POST /api/concepts, which falls back to
+// auto-generating the next one for the department if left blank.
+function updateFormConceptNo(value){
+  if (state.form) state.form.concept_no = value;
+}
 
 // Factory dropdown sourced from Contacts' Factory-position company names
 // (see state.factoryNames / loadLookupData) - mirrors desktop's
@@ -391,6 +398,15 @@ function renderFormDetailsSection(){
         </select>
       </div>
     </div>
+
+    ${state.form.isNew ? `
+      <div class="section">
+        <div class="section-label">Concept Code</div>
+        <div class="field">
+          <input value="${esc(state.form.concept_no||'')}" placeholder="Leave blank to auto-generate" style="text-transform:uppercase;" oninput="updateFormConceptNo(this.value)"/>
+        </div>
+      </div>
+    ` : ''}
 
     <div class="section">
       <div class="section-label">Fabric</div>
@@ -880,6 +896,7 @@ async function submitForm(){
       const formData = new FormData();
       Object.keys(f.concept).forEach(k => formData.append(k, f.concept[k] || ''));
       formData.append('spec_category_id', f.specCategoryId || '');
+      formData.append('concept_no', f.concept_no || '');
 
       const res = await fetch('/api/concepts', { method: 'POST', body: formData });
       const data = await res.json();

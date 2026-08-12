@@ -187,7 +187,19 @@ router.post('/', requireAuth, upload.array('photos', 10), async (req, res) => {
   if (user.role === 'buyer') return res.status(403).json({ error: 'Buyers cannot create concepts' });
   const { department, concept_date, spec_category_id, size_range_id } = req.body || {};
   if (!department || !DEPT_CODES[department]) return res.status(400).json({ error: 'A valid department is required' });
-  const conceptNo = nextConceptNo(department);
+
+  // A custom code can be typed in at creation instead of always taking the
+  // next auto-generated one for the department (see the same
+  // case-insensitive uniqueness check on PUT /:id's rename handling below).
+  let conceptNo;
+  const requestedConceptNo = (req.body.concept_no || '').toString().trim().toUpperCase();
+  if (requestedConceptNo) {
+    const clash = db.prepare('SELECT id FROM concepts WHERE UPPER(concept_no) = ?').get(requestedConceptNo);
+    if (clash) return res.status(400).json({ error: `Concept code ${requestedConceptNo} is already in use` });
+    conceptNo = requestedConceptNo;
+  } else {
+    conceptNo = nextConceptNo(department);
+  }
   const finalConceptDate = concept_date || new Date().toISOString().slice(0, 7); // 'YYYY-MM' - editable afterwards
 
   const cols = ['concept_no', 'department', 'concept_date', 'spec_category_id', 'size_range_id', ...CONCEPT_TEXT_FIELDS];
