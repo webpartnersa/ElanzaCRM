@@ -5,11 +5,10 @@ const path = require('path');
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 const { PDFDocument } = require('pdf-lib');
-const sharp = require('sharp');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 const { scopeStyleForRole } = require('../lib/scope');
-const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile } = require('../lib/imageConvert');
+const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile, imageFileToEmailDataUrl } = require('../lib/imageConvert');
 const { extractSpecFitFromPdf, extractSpecFitFromXlsx } = require('../lib/specFitReport');
 const { buildAppraisalWorkbook } = require('../lib/specAppraisalExport');
 const { REQUEST_TYPES, translateMessage } = require('../lib/conceptCostingTranslate');
@@ -221,8 +220,7 @@ router.post('/:id/send-request', requireAuth, requirePermission('styles'), async
       const fullPath = resolveUploadPath(p.path);
       if (!fs.existsSync(fullPath)) continue;
       try {
-        const pngBuffer = await sharp(fullPath).png().toBuffer();
-        photos.push({ dataUrl: 'data:image/png;base64,' + pngBuffer.toString('base64') });
+        photos.push({ dataUrl: await imageFileToEmailDataUrl(fullPath) });
       } catch (e) { /* a broken/unreadable photo shouldn't fail the whole send */ }
     }
 

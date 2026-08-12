@@ -2,7 +2,6 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const sharp = require('sharp');
 const bcrypt = require('bcryptjs');
 const OpenAI = require('openai');
 const { z } = require('zod');
@@ -15,6 +14,7 @@ const { translateConceptFields, translateMessage, REQUEST_TYPES } = require('../
 const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/conceptCostingEmailHtml');
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText, buildReminderEmailHtml, buildReminderPlainText } = require('../lib/conceptGenericRequestEmailHtml');
 const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
+const { imageFileToEmailDataUrl } = require('../lib/imageConvert');
 
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -610,8 +610,7 @@ function buildServer() {
             const fullPath = path.join(__dirname, '..', p.path);
             if (!fs.existsSync(fullPath)) continue;
             try {
-              const pngBuffer = await sharp(fullPath).png().toBuffer();
-              photos.push({ dataUrl: 'data:image/png;base64,' + pngBuffer.toString('base64') });
+              photos.push({ dataUrl: await imageFileToEmailDataUrl(fullPath) });
             } catch (e) { /* a broken/unreadable photo shouldn't fail the whole send */ }
           }
           const subjectObj = { concept_no: style.style_no, description: style.description, department: style.department };
@@ -642,8 +641,7 @@ function buildServer() {
           const fullPath = path.join(__dirname, '..', p.path);
           if (!fs.existsSync(fullPath)) continue;
           try {
-            const pngBuffer = await sharp(fullPath).png().toBuffer();
-            photos.push({ dataUrl: 'data:image/png;base64,' + pngBuffer.toString('base64') });
+            photos.push({ dataUrl: await imageFileToEmailDataUrl(fullPath) });
           } catch (e) { /* a broken/unreadable photo shouldn't fail the whole send */ }
         }
 

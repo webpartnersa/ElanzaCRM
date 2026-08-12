@@ -5,10 +5,9 @@ const path = require('path');
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 const { PDFDocument } = require('pdf-lib');
-const sharp = require('sharp');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
-const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile } = require('../lib/imageConvert');
+const { saveBufferAsWebp, convertBufferToWebpFile, makeThumbnailFile, imageFileToEmailDataUrl } = require('../lib/imageConvert');
 const { translateConceptFields, translateMessage, REQUEST_TYPES, LABELS } = require('../lib/conceptCostingTranslate');
 const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/conceptCostingEmailHtml');
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText } = require('../lib/conceptGenericRequestEmailHtml');
@@ -729,11 +728,7 @@ router.post('/:id/send-request', requireAuth, requirePermission('concepts'), asy
       const fullPath = resolveUploadPath(p.path);
       if (!fs.existsSync(fullPath)) continue;
       try {
-        // Every concept photo is saved as .webp (see lib/imageConvert.js) -
-        // converted to PNG here since inline webp rendering in mail clients
-        // is unreliable, same reasoning as the old PDF export.
-        const pngBuffer = await sharp(fullPath).png().toBuffer();
-        photos.push({ dataUrl: 'data:image/png;base64,' + pngBuffer.toString('base64') });
+        photos.push({ dataUrl: await imageFileToEmailDataUrl(fullPath) });
       } catch (e) { /* a broken/unreadable photo shouldn't fail the whole send */ }
     }
 
