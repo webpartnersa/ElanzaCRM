@@ -342,9 +342,10 @@ function updateFormField(key, value){
   if (state.form) state.form.concept[key] = value;
 }
 // concept_no lives at the top level of state.form (not under .concept, see
-// blankFormState) - a custom code typed in here at creation is sent
-// straight through to POST /api/concepts, which falls back to
-// auto-generating the next one for the department if left blank.
+// blankFormState) - editable both at creation (POST, falls back to
+// auto-generating the next one for the department if left blank) and on an
+// existing concept (PUT, validated case-insensitively unique same as
+// desktop's rename support).
 function updateFormConceptNo(value){
   if (state.form) state.form.concept_no = value;
 }
@@ -399,14 +400,12 @@ function renderFormDetailsSection(){
       </div>
     </div>
 
-    ${state.form.isNew ? `
-      <div class="section">
-        <div class="section-label">Concept Code</div>
-        <div class="field">
-          <input value="${esc(state.form.concept_no||'')}" placeholder="Leave blank to auto-generate" style="text-transform:uppercase;" oninput="updateFormConceptNo(this.value)"/>
-        </div>
+    <div class="section">
+      <div class="section-label">Concept Code</div>
+      <div class="field">
+        <input value="${esc(state.form.concept_no||'')}" placeholder="${state.form.isNew?'Leave blank to auto-generate':''}" style="text-transform:uppercase;" oninput="updateFormConceptNo(this.value)"/>
       </div>
-    ` : ''}
+    </div>
 
     <div class="section">
       <div class="section-label">Fabric</div>
@@ -926,7 +925,7 @@ async function submitForm(){
     }
   } else {
     try {
-      const body = { ...f.concept, spec_category_id: f.specCategoryId };
+      const body = { ...f.concept, spec_category_id: f.specCategoryId, concept_no: f.concept_no };
       const res = await fetch('/api/concepts/' + f.id, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       });
