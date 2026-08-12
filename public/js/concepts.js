@@ -746,11 +746,13 @@ async function loadConceptRequests(){
 function renderConceptRequestsTab(){
   const d = state.conceptDrawer;
   const requests = d.requests || [];
-  // Fit Sample only makes sense once a buyer has actually placed an order
-  // (see STYLE_REQUEST_TYPES in public/js/drawer.js) - a concept doesn't
-  // have one yet, so it's left off this list even though the other sample
-  // types are already offered here too.
-  const typeButtons = Object.keys(REQUEST_TYPES).filter(type => type !== 'fit_sample').map(type =>
+  // A concept only ever needs Costing (to negotiate price) and Sample (the
+  // very first physical sample) - Fit/PP/Bulk Sample and the fabric test
+  // report request all only make sense once a buyer has actually placed an
+  // order (see STYLE_REQUEST_TYPES in public/js/drawer.js), so they're left
+  // off this list entirely.
+  const CONCEPT_REQUEST_TYPES = ['cost', 'sample'];
+  const typeButtons = CONCEPT_REQUEST_TYPES.map(type =>
     `<button class="btn btn-ghost btn-sm" onclick="openRequestComposer('${type}')">${REQUEST_TYPES[type].en}</button>`
   ).join(' ');
 
