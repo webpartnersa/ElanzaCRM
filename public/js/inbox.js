@@ -148,7 +148,11 @@ const MATCH_TYPE_LABEL = { concept: 'Concept', style: 'Style', order: 'Order' };
 function formatInboxDate(receivedAt){
   if (!receivedAt) return '';
   const d = new Date(receivedAt);
-  return isNaN(d.getTime()) ? receivedAt : d.toLocaleString();
+  if (isNaN(d.getTime())) return receivedAt;
+  // Local date components (not toISOString, which would hand back UTC and
+  // undo the timezone conversion this exists for) - date only, no time.
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function renderInboxView(){
@@ -183,7 +187,7 @@ function renderInboxRow(item){
             ${INBOX_STATUS_BADGE[item.match_status] || ''}
             ${linkedSummary ? `<span class="hint">${escapeHtml(linkedSummary)}</span>` : ''}
           </div>
-          <div class="hint" style="margin-top:3px;">${escapeHtml(item.from_name || item.from_email || '')} &lt;${escapeHtml(item.from_email || '')}&gt; &middot; ${formatInboxDate(item.received_at)}</div>
+          <div class="hint" style="margin-top:3px;">${escapeHtml(item.from_name || item.from_email || '')} - ${formatInboxDate(item.received_at)}</div>
         </div>
         <div class="hint" style="flex-shrink:0;">${expanded ? '▲' : '▼'}</div>
       </div>

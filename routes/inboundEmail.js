@@ -22,6 +22,17 @@ function safeSegment(v, fallback) {
   return s || fallback;
 }
 
+// email.headers.from is the raw RFC 5322 header value - '"Brian - Web
+// Partner" <brian@webpartner.co.za>', not a bare display name - pull just
+// the name portion out so it doesn't get stored (and later shown) as a
+// literal quoted "Name <email>" string.
+function parseFromName(raw) {
+  if (!raw) return null;
+  const m = raw.match(/^"?([^"<]*)"?\s*<[^>]+>\s*$/);
+  const name = (m ? m[1] : raw).trim();
+  return name || null;
+}
+
 // Resend sends the webhook via Svix, which is at-least-once delivery, not
 // exactly-once - a redelivery of the same event is expected/normal, not an
 // error. resend_email_id is UNIQUE, so this is a safe no-op on a repeat.
@@ -86,7 +97,7 @@ async function fetchAndStore(resendEmailId) {
       WHERE resend_email_id = ?
     `).run(
       email.from || row.from_email,
-      (email.headers && email.headers.from) || row.from_name,
+      parseFromName(email.headers && email.headers.from) || row.from_name,
       Array.isArray(email.to) ? email.to.join(', ') : (email.to || row.to_email),
       Array.isArray(email.cc) ? email.cc.join(', ') : (email.cc || row.cc),
       email.subject || row.subject,
