@@ -102,26 +102,45 @@ function toggleInboxItem(id){
 }
 function findInboxItem(id){ return DEMO_INBOX.find(e => e.id === id); }
 
+// Product decision (confirmed with the user): once every proposed change on
+// a matched email has been resolved (applied or declined, none left
+// pending), the email is removed outright - no "resolved" archive to look
+// back at, same as clearing a real inbox. Mirrors lib/emailApply.js's
+// cleanupIfFullyResolved exactly, including the "never on a freshly
+// matched/linked email with zero changes" guard (see inboxPickCandidate/
+// inboxLinkRecord below, which don't call this).
+function maybeRemoveResolved(emailId){
+  const item = findInboxItem(emailId);
+  if (!item || !item.changes || !item.changes.length) return;
+  if (item.changes.some(c => c.status === 'pending')) return;
+  DEMO_INBOX = DEMO_INBOX.filter(e => e.id !== emailId);
+  if (state.inboxDemo.expandedId === emailId) state.inboxDemo.expandedId = null;
+}
+
 function inboxApplyChange(emailId, changeId){
   const item = findInboxItem(emailId);
   const change = item.changes.find(c => c.id === changeId);
   change.status = 'applied';
+  maybeRemoveResolved(emailId);
   render();
 }
 function inboxDeclineChange(emailId, changeId){
   const item = findInboxItem(emailId);
   const change = item.changes.find(c => c.id === changeId);
   change.status = 'declined';
+  maybeRemoveResolved(emailId);
   render();
 }
 function inboxApplyAll(emailId){
   const item = findInboxItem(emailId);
   item.changes.filter(c => c.status === 'pending').forEach(c => c.status = 'applied');
+  maybeRemoveResolved(emailId);
   render();
 }
 function inboxDeclineAll(emailId){
   const item = findInboxItem(emailId);
   item.changes.filter(c => c.status === 'pending').forEach(c => c.status = 'declined');
+  maybeRemoveResolved(emailId);
   render();
 }
 function inboxPickCandidate(emailId, idx){

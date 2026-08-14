@@ -931,7 +931,7 @@ function buildServer() {
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
       try {
         const change = applyEmailChange(change_id);
-        return { content: [{ type: 'text', text: `Applied: ${change.field_label} → ${change.proposed_value}` }] };
+        return { content: [{ type: 'text', text: `Applied: ${change.field_label} → ${change.proposed_value}${change.email_deleted ? ' - that was the last pending change, so the email has been removed from the inbox.' : ''}` }] };
       } catch (e) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -947,7 +947,7 @@ function buildServer() {
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
       try {
         const change = declineEmailChange(change_id);
-        return { content: [{ type: 'text', text: `Declined: ${change.field_label}` }] };
+        return { content: [{ type: 'text', text: `Declined: ${change.field_label}${change.email_deleted ? ' - that was the last pending change, so the email has been removed from the inbox.' : ''}` }] };
       } catch (e) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -956,28 +956,28 @@ function buildServer() {
 
   server.tool(
     'apply_all_inbound_email_changes',
-    'Apply every still-pending proposed field change for one inbound email in a single action. Requires session_token from identify_user_by_pin.',
+    'Apply every still-pending proposed field change for one inbound email in a single action. If that resolves every change on the email, it is removed from the inbox. Requires session_token from identify_user_by_pin.',
     { session_token: z.string().optional(), id: z.number() },
     async ({ session_token, id }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
-      const results = applyAllEmailChanges(id);
+      const { results, email_deleted } = applyAllEmailChanges(id);
       if (!results.length) return { content: [{ type: 'text', text: 'No pending changes for this email.' }] };
       const failed = results.filter(r => !r.ok);
-      return { content: [{ type: 'text', text: `Applied ${results.length - failed.length}/${results.length} change(s).${failed.length ? ' Failed: ' + failed.map(f => `${f.field_name} (${f.error})`).join(', ') : ''}` }] };
+      return { content: [{ type: 'text', text: `Applied ${results.length - failed.length}/${results.length} change(s).${failed.length ? ' Failed: ' + failed.map(f => `${f.field_name} (${f.error})`).join(', ') : ''}${email_deleted ? ' Email fully resolved and removed from the inbox.' : ''}` }] };
     }
   );
 
   server.tool(
     'decline_all_inbound_email_changes',
-    'Decline every still-pending proposed field change for one inbound email in a single action. Requires session_token from identify_user_by_pin.',
+    'Decline every still-pending proposed field change for one inbound email in a single action. If that resolves every change on the email, it is removed from the inbox. Requires session_token from identify_user_by_pin.',
     { session_token: z.string().optional(), id: z.number() },
     async ({ session_token, id }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
-      const results = declineAllEmailChanges(id);
+      const { results, email_deleted } = declineAllEmailChanges(id);
       if (!results.length) return { content: [{ type: 'text', text: 'No pending changes for this email.' }] };
-      return { content: [{ type: 'text', text: `Declined ${results.length} change(s).` }] };
+      return { content: [{ type: 'text', text: `Declined ${results.length} change(s).${email_deleted ? ' Email fully resolved and removed from the inbox.' : ''}` }] };
     }
   );
 
