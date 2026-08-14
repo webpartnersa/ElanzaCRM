@@ -8,72 +8,90 @@
 // mockup - delete this file + its nav entry once a decision is made, same
 // as tasksDemo.js.
 //
-// The three statuses mirror the real backend's own three outcomes (see
-// lib/emailMatch.js): 'matched' (single confident match - green),
-// 'multiple' (a few candidates, needs a human pick - amber), 'unmatched'
-// (needs a manual search/link - gray).
+// An email can be linked to more than one real record at once - one
+// factory update sometimes genuinely covers two different styles, not just
+// "ambiguous, pick the one true match". So each item carries `linkedRecords`
+// (0+ records it's confirmed to be about, each with its own proposed
+// changes) AND `candidates` (any remaining not-yet-linked possibilities) -
+// the badge is computed from those, not a fixed status string, exactly
+// mirroring lib/emailApply.js's real getLinkedRecords/resolveMatch model.
 let DEMO_INBOX = [
   {
-    id: 1, status: 'matched',
+    id: 1,
     from_name: 'Wofeng Sourcing', from_email: 'sourcing@wofeng-example.com',
     subject: 'RE: SAMPLE-EYB001 costing confirmation',
     received_at: '2026-08-14 09:12',
     body: `Hi, confirming for SAMPLE-EYB001: final unit cost is now $54.50 (up from the original quote due to fleece price increase), and we will need to switch fabric to 100% Organic Cotton Fleece since the standard cotton fleece is out of stock at our mill. Units and delivery date remain unchanged.\n\nThanks,\nWofeng Sourcing`,
-    match: { type: 'style', no: 'SAMPLE-EYB001', label: 'Boys Fleece Hoodie' },
-    changes: [
-      { id: 1, field_label: 'Cost', current: '52.30', proposed: '54.50', snippet: 'final unit cost is now $54.50 (up from the original quote due to fleece price increase)', status: 'pending' },
-      { id: 2, field_label: 'Fabric', current: '100% Cotton Fleece', proposed: '100% Organic Cotton Fleece', snippet: 'we will need to switch fabric to 100% Organic Cotton Fleece since the standard cotton fleece is out of stock at our mill', status: 'pending' },
+    linkedRecords: [
+      { type: 'style', no: 'SAMPLE-EYB001', label: 'Boys Fleece Hoodie', changes: [
+        { id: 1, field_label: 'Cost', current: '52.30', proposed: '54.50', snippet: 'final unit cost is now $54.50 (up from the original quote due to fleece price increase)', status: 'pending' },
+        { id: 2, field_label: 'Fabric', current: '100% Cotton Fleece', proposed: '100% Organic Cotton Fleece', snippet: 'we will need to switch fabric to 100% Organic Cotton Fleece since the standard cotton fleece is out of stock at our mill', status: 'pending' },
+      ] },
     ],
+    candidates: [],
   },
   {
-    id: 2, status: 'matched',
+    id: 2,
     from_name: 'Wofeng Sourcing', from_email: 'sourcing@wofeng-example.com',
     subject: 'RE: SAMPLE-PO-1002 delivery update',
     received_at: '2026-08-14 10:47',
     body: `Apologies, the PO delivery date for SAMPLE-PO-1002 will slip to 2026-10-05 due to a container booking delay. PO price stays at $34.10 as agreed.\n\nRegards`,
-    match: { type: 'order', no: 'SAMPLE-PO-1002', label: 'Older Boys Joggers' },
-    changes: [
-      { id: 3, field_label: 'PO Delivery Date', current: '2026-09-20', proposed: '2026-10-05', snippet: 'the PO delivery date for SAMPLE-PO-1002 will slip to 2026-10-05 due to a container booking delay', status: 'pending' },
+    linkedRecords: [
+      { type: 'order', no: 'SAMPLE-PO-1002', label: 'Older Boys Joggers', changes: [
+        { id: 3, field_label: 'PO Delivery Date', current: '2026-09-20', proposed: '2026-10-05', snippet: 'the PO delivery date for SAMPLE-PO-1002 will slip to 2026-10-05 due to a container booking delay', status: 'pending' },
+      ] },
     ],
+    candidates: [],
   },
   {
-    id: 3, status: 'matched',
+    id: 3,
     from_name: 'Wofeng Sourcing', from_email: 'sourcing@wofeng-example.com',
     subject: 'RE: CYB002 lead time',
     received_at: '2026-08-13 15:20',
     body: `For CYB002 (pinstripes denim jacket), lead time from PO to ex-factory will be 75 days given the current order book. No change to factory.\n\nThanks`,
-    match: { type: 'concept', no: 'CYB002', label: 'pinstripes denim jacket' },
-    changes: [
-      { id: 4, field_label: 'Lead Time', current: '—', proposed: '75 days given the current order book', snippet: 'lead time from PO to ex-factory will be 75 days given the current order book', status: 'applied' },
+    linkedRecords: [
+      { type: 'concept', no: 'CYB002', label: 'pinstripes denim jacket', changes: [
+        { id: 4, field_label: 'Lead Time', current: '—', proposed: '75 days given the current order book', snippet: 'lead time from PO to ex-factory will be 75 days given the current order book', status: 'applied' },
+      ] },
     ],
+    candidates: [],
   },
   {
-    id: 4, status: 'multiple',
+    id: 4,
     from_name: 'Wofeng Sourcing', from_email: 'sourcing@wofeng-example.com',
     subject: 'Update on a couple of styles',
     received_at: '2026-08-14 08:03',
+    // Genuinely about two different styles, not one ambiguous style - both
+    // "Use this" buttons stay available after picking either one, so both
+    // can be linked (see inboxPickCandidate).
     body: `Quick update: SAMPLE-EYB001 fabric is in, and separately SAMPLE-PEOB001 samples shipped yesterday.\n\nLet us know if you need anything else.`,
+    linkedRecords: [],
     candidates: [
-      { type: 'style', no: 'SAMPLE-EYB001', label: 'Boys Fleece Hoodie' },
-      { type: 'style', no: 'SAMPLE-PEOB001', label: 'Older Boys Joggers' },
-    ],
-    changesIfPicked: [
-      { id: 5, field_label: 'Fabric', current: '100% Cotton Fleece', proposed: 'Received / in stock', snippet: 'SAMPLE-EYB001 fabric is in', status: 'pending' },
+      { type: 'style', no: 'SAMPLE-EYB001', label: 'Boys Fleece Hoodie', changesIfPicked: [
+        { id: 5, field_label: 'Fabric', current: '100% Cotton Fleece', proposed: 'Received / in stock', snippet: 'SAMPLE-EYB001 fabric is in', status: 'pending' },
+      ] },
+      { type: 'style', no: 'SAMPLE-PEOB001', label: 'Older Boys Joggers', changesIfPicked: [
+        { id: 6, field_label: 'Fit Sample', current: 'Awaiting', proposed: 'Received', snippet: 'SAMPLE-PEOB001 samples shipped yesterday', status: 'pending' },
+      ] },
     ],
   },
   {
-    id: 5, status: 'unmatched',
+    id: 5,
     from_name: 'PnP Buying Team', from_email: 'buyer@pnp-example.co.za',
     subject: 'Quick question about delivery timing',
     received_at: '2026-08-14 11:30',
     body: `Hi team, just checking on general delivery timing for the upcoming season - can someone give me a call when you have a moment?\n\nThanks`,
+    linkedRecords: [],
+    candidates: [],
   },
   {
-    id: 6, status: 'unmatched',
+    id: 6,
     from_name: 'New Supplier', from_email: 'hello@newsupplier-example.com',
     subject: 'Introducing our new fabric range',
     received_at: '2026-08-13 14:05',
     body: `Hello, we would like to introduce our new range of sustainable fabrics for your upcoming collections. Happy to send swatches on request.\n\nBest regards`,
+    linkedRecords: [],
+    candidates: [],
   },
 ];
 
@@ -102,55 +120,66 @@ function toggleInboxItem(id){
 }
 function findInboxItem(id){ return DEMO_INBOX.find(e => e.id === id); }
 
-// Product decision (confirmed with the user): once every proposed change on
-// a matched email has been resolved (applied or declined, none left
-// pending), the email is removed outright - no "resolved" archive to look
-// back at, same as clearing a real inbox. Mirrors lib/emailApply.js's
-// cleanupIfFullyResolved exactly, including the "never on a freshly
-// matched/linked email with zero changes" guard (see inboxPickCandidate/
-// inboxLinkRecord below, which don't call this).
+function inboxBadgeStatus(item){
+  if (item.linkedRecords.length) return 'matched';
+  if (item.candidates.length) return 'multiple';
+  return 'unmatched';
+}
+
+// Product decision (confirmed with the user): once EVERY proposed change on
+// EVERY linked record has been resolved (applied or declined, none left
+// pending) AND there are no more unlinked candidates worth considering, the
+// email is removed outright - no "resolved" archive to look back at, same
+// as clearing a real inbox. Mirrors lib/emailApply.js's
+// cleanupIfFullyResolved, including the "never while nothing was ever
+// proposed" guard (a freshly linked record with zero changes doesn't count
+// as resolved - see inboxPickCandidate/inboxLinkRecord, neither of which
+// call this).
 function maybeRemoveResolved(emailId){
   const item = findInboxItem(emailId);
-  if (!item || !item.changes || !item.changes.length) return;
-  if (item.changes.some(c => c.status === 'pending')) return;
+  if (!item) return;
+  if (item.candidates.length) return; // still something un-considered
+  const allChanges = item.linkedRecords.flatMap(r => r.changes);
+  if (!allChanges.length) return;
+  if (allChanges.some(c => c.status === 'pending')) return;
   DEMO_INBOX = DEMO_INBOX.filter(e => e.id !== emailId);
   if (state.inboxDemo.expandedId === emailId) state.inboxDemo.expandedId = null;
 }
 
-function inboxApplyChange(emailId, changeId){
+function inboxApplyChange(emailId, recordIdx, changeId){
   const item = findInboxItem(emailId);
-  const change = item.changes.find(c => c.id === changeId);
+  const change = item.linkedRecords[recordIdx].changes.find(c => c.id === changeId);
   change.status = 'applied';
   maybeRemoveResolved(emailId);
   render();
 }
-function inboxDeclineChange(emailId, changeId){
+function inboxDeclineChange(emailId, recordIdx, changeId){
   const item = findInboxItem(emailId);
-  const change = item.changes.find(c => c.id === changeId);
+  const change = item.linkedRecords[recordIdx].changes.find(c => c.id === changeId);
   change.status = 'declined';
   maybeRemoveResolved(emailId);
   render();
 }
-function inboxApplyAll(emailId){
+function inboxApplyAll(emailId, recordIdx){
   const item = findInboxItem(emailId);
-  item.changes.filter(c => c.status === 'pending').forEach(c => c.status = 'applied');
+  item.linkedRecords[recordIdx].changes.filter(c => c.status === 'pending').forEach(c => c.status = 'applied');
   maybeRemoveResolved(emailId);
   render();
 }
-function inboxDeclineAll(emailId){
+function inboxDeclineAll(emailId, recordIdx){
   const item = findInboxItem(emailId);
-  item.changes.filter(c => c.status === 'pending').forEach(c => c.status = 'declined');
+  item.linkedRecords[recordIdx].changes.filter(c => c.status === 'pending').forEach(c => c.status = 'declined');
   maybeRemoveResolved(emailId);
   render();
 }
+// Links one candidate without discarding the others - a genuinely
+// multi-subject email (like DEMO_INBOX id 4) can have every one of its
+// candidates linked in turn, each keeping its own independent changes.
 function inboxPickCandidate(emailId, idx){
   const item = findInboxItem(emailId);
   const picked = item.candidates[idx];
-  item.status = 'matched';
-  item.match = picked;
-  item.changes = (item.changesIfPicked || []).map(c => ({...c}));
-  delete item.candidates;
-  delete item.changesIfPicked;
+  item.linkedRecords.push({ type: picked.type, no: picked.no, label: picked.label, changes: (picked.changesIfPicked || []).map(c => ({...c})) });
+  item.candidates.splice(idx, 1);
   render();
 }
 function inboxSetSearchQuery(emailId, q){
@@ -167,9 +196,9 @@ function inboxSetSearchQuery(emailId, q){
 function inboxLinkRecord(emailId, no){
   const item = findInboxItem(emailId);
   const record = DEMO_SEARCH_INDEX.find(r => r.no === no);
-  item.status = 'matched';
-  item.match = record;
-  item.changes = []; // a manual link has no AI-proposed changes yet in this mock - a real Phase 5 would re-run extraction once linked
+  // A manual link has no AI-proposed changes yet in this mock - the real
+  // Phase 5 re-runs extraction against the newly linked record.
+  item.linkedRecords.push({ type: record.type, no: record.no, label: record.label, changes: [] });
   render();
 }
 
@@ -188,9 +217,10 @@ const MATCH_TYPE_LABEL = { concept: 'Concept', style: 'Style', order: 'Order' };
 
 function renderInboxDemoView(){
   initInboxDemoState();
-  const matchedCount = DEMO_INBOX.filter(e => e.status === 'matched').length;
-  const multipleCount = DEMO_INBOX.filter(e => e.status === 'multiple').length;
-  const unmatchedCount = DEMO_INBOX.filter(e => e.status === 'unmatched').length;
+  const statuses = DEMO_INBOX.map(inboxBadgeStatus);
+  const matchedCount = statuses.filter(s => s === 'matched').length;
+  const multipleCount = statuses.filter(s => s === 'multiple').length;
+  const unmatchedCount = statuses.filter(s => s === 'unmatched').length;
   return `
     <div class="topbar">
       <div><h1 class="display">Inbox</h1><p>Prototype - AI-matched inbound mail, not live data</p></div>
@@ -205,14 +235,16 @@ function renderInboxDemoView(){
 
 function renderInboxRow(item){
   const expanded = state.inboxDemo.expandedId === item.id;
+  const badgeStatus = inboxBadgeStatus(item);
+  const linkedSummary = item.linkedRecords.map(r => `${MATCH_TYPE_LABEL[r.type]} ${r.no}`).join(', ');
   return `
     <div class="card" style="padding:0;margin-bottom:12px;overflow:hidden;">
       <div style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;gap:12px;cursor:pointer;" onclick="toggleInboxItem(${item.id})">
         <div style="min-width:0;">
           <div style="display:flex;align-items:center;gap:10px;">
             <span class="style-name" style="font-size:14.5px;">${item.subject}</span>
-            ${INBOX_STATUS_BADGE[item.status]}
-            ${item.match ? `<span class="hint">${MATCH_TYPE_LABEL[item.match.type]} ${item.match.no}</span>` : ''}
+            ${INBOX_STATUS_BADGE[badgeStatus]}
+            ${linkedSummary ? `<span class="hint">${linkedSummary}</span>` : ''}
           </div>
           <div class="hint" style="margin-top:3px;">${item.from_name} &lt;${item.from_email}&gt; &middot; ${item.received_at}</div>
         </div>
@@ -227,60 +259,61 @@ function renderInboxDetail(item){
   return `
     <div style="border-top:1px solid var(--line);padding:16px 18px;background:var(--line-soft);">
       <div style="white-space:pre-wrap;font-size:13.5px;background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">${item.body}</div>
-      ${item.status === 'matched' ? renderInboxChanges(item) : ''}
-      ${item.status === 'multiple' ? renderInboxCandidates(item) : ''}
-      ${item.status === 'unmatched' ? renderInboxSearchBox(item) : ''}
+      ${item.linkedRecords.map((r, idx) => renderInboxRecordChanges(item, r, idx)).join('')}
+      ${item.candidates.length ? renderInboxCandidates(item) : ''}
+      ${!item.linkedRecords.length && !item.candidates.length ? renderInboxSearchBox(item) : ''}
     </div>
   `;
 }
 
-function renderInboxChanges(item){
-  const pendingCount = item.changes.filter(c => c.status === 'pending').length;
-  if (!item.changes.length) {
-    return `<div class="hint">No field changes proposed for this email.</div>`;
-  }
+function renderInboxRecordChanges(item, record, recordIdx){
+  const pendingCount = record.changes.filter(c => c.status === 'pending').length;
   return `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <div style="font-size:13px;font-weight:600;">Proposed changes - ${MATCH_TYPE_LABEL[item.match.type]} ${item.match.no}</div>
-      ${pendingCount > 1 ? `
-        <div class="row-actions">
-          <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px;" onclick="inboxApplyAll(${item.id})">Apply all</button>
-          <button class="btn btn-danger" style="padding:6px 12px;font-size:12px;" onclick="inboxDeclineAll(${item.id})">Decline all</button>
-        </div>` : ''}
-    </div>
-    ${item.changes.map(c => `
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);${CHANGE_STATUS_STYLE[c.status]}">
-        <div style="min-width:0;flex:1;">
-          <div style="font-size:13px;font-weight:600;">${c.field_label}</div>
-          <div style="font-size:13px;margin-top:2px;">
-            <span style="color:var(--ink-soft);">${c.current || '—'}</span>
-            <span style="margin:0 6px;">&rarr;</span>
-            <strong>${c.proposed}</strong>
-          </div>
-          <div class="hint" style="margin-top:4px;font-style:italic;">"${c.snippet}"</div>
-        </div>
-        <div style="flex-shrink:0;">
-          ${c.status === 'pending' ? `
-            <div class="row-actions">
-              <button class="btn btn-ghost" style="padding:5px 11px;font-size:12px;" onclick="inboxApplyChange(${item.id},${c.id})">Apply</button>
-              <button class="btn btn-danger" style="padding:5px 11px;font-size:12px;" onclick="inboxDeclineChange(${item.id},${c.id})">Decline</button>
-            </div>
-          ` : `<span class="hint" style="font-weight:600;">${c.status === 'applied' ? '✓ Applied' : '✕ Declined'}</span>`}
-        </div>
+    <div style="${recordIdx > 0 ? 'margin-top:16px;padding-top:16px;border-top:1px dashed var(--line);' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:13px;font-weight:600;">${record.changes.length ? 'Proposed changes' : 'Linked'} - ${MATCH_TYPE_LABEL[record.type]} ${record.no} <span class="hint" style="font-weight:400;">${record.label}</span></div>
+        ${pendingCount > 1 ? `
+          <div class="row-actions">
+            <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px;" onclick="inboxApplyAll(${item.id},${recordIdx})">Apply all</button>
+            <button class="btn btn-danger" style="padding:6px 12px;font-size:12px;" onclick="inboxDeclineAll(${item.id},${recordIdx})">Decline all</button>
+          </div>` : ''}
       </div>
-    `).join('')}
+      ${!record.changes.length ? `<div class="hint">No field changes proposed for this record.</div>` : record.changes.map(c => `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);${CHANGE_STATUS_STYLE[c.status]}">
+          <div style="min-width:0;flex:1;">
+            <div style="font-size:13px;font-weight:600;">${c.field_label}</div>
+            <div style="font-size:13px;margin-top:2px;">
+              <span style="color:var(--ink-soft);">${c.current || '—'}</span>
+              <span style="margin:0 6px;">&rarr;</span>
+              <strong>${c.proposed}</strong>
+            </div>
+            <div class="hint" style="margin-top:4px;font-style:italic;">"${c.snippet}"</div>
+          </div>
+          <div style="flex-shrink:0;">
+            ${c.status === 'pending' ? `
+              <div class="row-actions">
+                <button class="btn btn-ghost" style="padding:5px 11px;font-size:12px;" onclick="inboxApplyChange(${item.id},${recordIdx},${c.id})">Apply</button>
+                <button class="btn btn-danger" style="padding:5px 11px;font-size:12px;" onclick="inboxDeclineChange(${item.id},${recordIdx},${c.id})">Decline</button>
+              </div>
+            ` : `<span class="hint" style="font-weight:600;">${c.status === 'applied' ? '✓ Applied' : '✕ Declined'}</span>`}
+          </div>
+        </div>
+      `).join('')}
+    </div>
   `;
 }
 
 function renderInboxCandidates(item){
   return `
-    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Which record is this about?</div>
-    ${item.candidates.map((c, idx) => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border:1px solid var(--line);border-radius:var(--radius);margin-bottom:8px;background:var(--paper-raised);">
-        <div><span class="hint">${MATCH_TYPE_LABEL[c.type]}</span> <strong>${c.no}</strong> &middot; ${c.label}</div>
-        <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onclick="inboxPickCandidate(${item.id},${idx})">Use this</button>
-      </div>
-    `).join('')}
+    <div style="${item.linkedRecords.length ? 'margin-top:16px;padding-top:16px;border-top:1px dashed var(--line);' : ''}">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;">${item.linkedRecords.length ? 'Also worth checking - this email may cover more than one record' : 'Which record is this about?'}</div>
+      ${item.candidates.map((c, idx) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border:1px solid var(--line);border-radius:var(--radius);margin-bottom:8px;background:var(--paper-raised);">
+          <div><span class="hint">${MATCH_TYPE_LABEL[c.type]}</span> <strong>${c.no}</strong> &middot; ${c.label}</div>
+          <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onclick="inboxPickCandidate(${item.id},${idx})">Use this</button>
+        </div>
+      `).join('')}
+    </div>
   `;
 }
 

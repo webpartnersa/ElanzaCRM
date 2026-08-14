@@ -1069,6 +1069,16 @@ ensureConceptRequestsConceptIdNullable();
 // routes/inboundEmail.js's extractSweep tell "ran extraction, found
 // nothing" apart from "never ran" for a matched row.
 ensureColumn('inbound_emails', 'extracted_at', 'TEXT');
+// A single email can genuinely be about more than one record at once (e.g.
+// one factory update covering two different styles in the same message) -
+// each proposed change carries its own match_type/match_id rather than
+// inheriting a single one from the parent inbound_emails row, so extraction
+// can be run per-record and Apply/Decline on one linked record never
+// touches another's changes. inbound_emails.match_type/match_id still get
+// set to whichever record was linked first, kept as the "primary" match for
+// list/badge display - see lib/emailApply.js's resolveMatch.
+ensureColumn('inbound_email_field_changes', 'match_type', 'TEXT');
+ensureColumn('inbound_email_field_changes', 'match_id', 'INTEGER');
 db.exec(`
   CREATE TABLE IF NOT EXISTS inbound_email_field_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

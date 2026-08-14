@@ -15,7 +15,7 @@ const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/concept
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText, buildReminderEmailHtml, buildReminderPlainText } = require('../lib/conceptGenericRequestEmailHtml');
 const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
 const { imageFileToEmailDataUrl } = require('../lib/imageConvert');
-const { applyChange: applyEmailChange, declineChange: declineEmailChange, applyAllPending: applyAllEmailChanges, declineAllPending: declineAllEmailChanges, resolveMatch: resolveEmailMatch, recordLabel: emailRecordLabel } = require('../lib/emailApply');
+const { applyChange: applyEmailChange, declineChange: declineEmailChange, applyAllPending: applyAllEmailChanges, declineAllPending: declineAllEmailChanges, resolveMatch: resolveEmailMatch, recordLabel: emailRecordLabel, getLinkedRecords: emailGetLinkedRecords } = require('../lib/emailApply');
 
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -856,10 +856,11 @@ function buildServer() {
   // detail a buyer account shouldn't see.
   function summarizeInboundEmail(row) {
     const pendingCount = db.prepare(`SELECT COUNT(*) c FROM inbound_email_field_changes WHERE inbound_email_id = ? AND status = 'pending'`).get(row.id).c;
+    const linked = emailGetLinkedRecords(row.id).map(r => emailRecordLabel(r.match_type, r.match_id)).filter(Boolean);
     return {
       id: row.id, from: row.from_email, subject: row.subject, received_at: row.received_at,
-      match_status: row.match_status, match_type: row.match_type,
-      match_record: row.match_type ? emailRecordLabel(row.match_type, row.match_id) : null,
+      match_status: row.match_status,
+      linked_records: linked, // an email can be linked to more than one record - see lib/emailApply.js's resolveMatch
       pending_changes: pendingCount,
     };
   }
@@ -869,10 +870,21 @@ function buildServer() {
     if (recordType === 'order') { const o = findOrder({ order_no: recordNo, style_no: recordNo }); return o ? o.id : null; }
     return null;
   }
+  // Candidates from Phase 2's own matching (match_candidates_json) that
+  // haven't actually been linked yet - what's still worth offering to
+  // resolve_inbound_email_match, whether the email started 'multiple' or a
+  // human already linked one candidate and the others are still open.
+  function unlinkedCandidatesMcp(row) {
+    if (!row.match_candidates_json) return [];
+    let candidates;
+    try { candidates = JSON.parse(row.match_candidates_json); } catch (e) { return []; }
+    const linked = emailGetLinkedRecords(row.id);
+    return candidates.filter(c => !linked.some(l => l.match_type === c.type && l.match_id === c.id));
+  }
 
   server.tool(
     'list_inbound_emails',
-    'List inbound emails Docket has matched to concepts/styles/orders (from crm@portal.elanzas.com), optionally filtered by match status. Each entry shows how many field changes are still pending review. Requires session_token from identify_user_by_pin.',
+    'List inbound emails Docket has matched to concepts/styles/orders (from crm@portal.elanzas.com), optionally filtered by match status. Each entry shows every record it\'s linked to so far (an email can genuinely be about more than one) and how many field changes are still pending review. Requires session_token from identify_user_by_pin.',
     { session_token: z.string().optional(), match_status: z.enum(['matched', 'multiple', 'unmatched']).optional() },
     async ({ session_token, match_status }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
@@ -886,27 +898,29 @@ function buildServer() {
 
   server.tool(
     'get_inbound_email',
-    'Get one inbound email\'s full body, its match (or candidate list, if still ambiguous), and every proposed field change with its current/proposed value and the exact source snippet. Requires session_token from identify_user_by_pin.',
+    'Get one inbound email\'s full body, every record it\'s linked to so far with that record\'s own proposed field changes (current/proposed value + exact source snippet), and any remaining candidates not yet linked (an email can genuinely be about more than one record - e.g. one factory update covering two different styles - so linking one doesn\'t mean the others should be ignored). Requires session_token from identify_user_by_pin.',
     { session_token: z.string().optional(), id: z.number() },
     async ({ session_token, id }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
       const row = db.prepare('SELECT * FROM inbound_emails WHERE id = ?').get(id);
       if (!row) return { content: [{ type: 'text', text: `No inbound email found with id ${id}` }] };
-      const changes = db.prepare(`SELECT id, field_name, field_label, current_value, proposed_value, source_snippet, status FROM inbound_email_field_changes WHERE inbound_email_id = ? ORDER BY id ASC`).all(id);
-      const candidates = row.match_status === 'multiple' && row.match_candidates_json ? JSON.parse(row.match_candidates_json) : null;
+      const linkedRecords = emailGetLinkedRecords(id).map(r => ({
+        record: emailRecordLabel(r.match_type, r.match_id),
+        changes: db.prepare(`SELECT id, field_name, field_label, current_value, proposed_value, source_snippet, status FROM inbound_email_field_changes WHERE inbound_email_id = ? AND match_type = ? AND match_id = ? ORDER BY id ASC`).all(id, r.match_type, r.match_id),
+      }));
       return { content: [{ type: 'text', text: JSON.stringify({
         id: row.id, from: row.from_email, subject: row.subject, received_at: row.received_at, body: row.text_body,
-        match_status: row.match_status, match_type: row.match_type,
-        match_record: row.match_type ? emailRecordLabel(row.match_type, row.match_id) : null,
-        candidates, changes,
+        match_status: row.match_status,
+        linked_records: linkedRecords,
+        unlinked_candidates: unlinkedCandidatesMcp(row),
       }, null, 2) }] };
     }
   );
 
   server.tool(
     'resolve_inbound_email_match',
-    'Tell Docket which real concept/style/order an inbound email is actually about - use this both to pick the right one when get_inbound_email showed multiple candidates, and to manually link an email that came back unmatched. Immediately re-runs field-change extraction against the confirmed record. Requires session_token from identify_user_by_pin.',
+    'Tell Docket which real concept/style/order an inbound email is actually about - use this to pick among candidates get_inbound_email showed, to manually link an email that came back unmatched, or to link an ADDITIONAL record when one email is genuinely about more than one (e.g. it updates two different styles at once) - call it again with the other record rather than treating them as mutually exclusive. Immediately runs field-change extraction against the newly confirmed record. Requires session_token from identify_user_by_pin.',
     { session_token: z.string().optional(), id: z.number(), record_type: z.enum(['concept', 'style', 'order']), record_no: z.string().describe('The concept number, style number, or order/style number for an order') },
     async ({ session_token, id, record_type, record_no }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
@@ -915,7 +929,9 @@ function buildServer() {
       if (!recordId) return { content: [{ type: 'text', text: `No ${record_type} found for ${record_no}` }] };
       try {
         const { record, changes } = await resolveEmailMatch(id, record_type, recordId, openaiClient);
-        return { content: [{ type: 'text', text: `Linked to ${record_type} ${record.no}. ${changes.length ? `${changes.length} field change(s) proposed - review with get_inbound_email.` : 'No field changes proposed from this email.'}` }] };
+        const row = db.prepare('SELECT * FROM inbound_emails WHERE id = ?').get(id);
+        const remaining = unlinkedCandidatesMcp(row);
+        return { content: [{ type: 'text', text: `Linked to ${record_type} ${record.no}. ${changes.length ? `${changes.length} field change(s) proposed - review with get_inbound_email.` : 'No field changes proposed from this email.'}${remaining.length ? ` This email also still has ${remaining.length} unlinked candidate(s) worth checking - it may be about more than one record.` : ''}` }] };
       } catch (e) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -931,7 +947,7 @@ function buildServer() {
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
       try {
         const change = applyEmailChange(change_id);
-        return { content: [{ type: 'text', text: `Applied: ${change.field_label} → ${change.proposed_value}${change.email_deleted ? ' - that was the last pending change, so the email has been removed from the inbox.' : ''}` }] };
+        return { content: [{ type: 'text', text: `Applied: ${change.field_label} → ${change.proposed_value}${change.email_deleted ? ' - that was the last pending change across every linked record, so the email has been removed from the inbox.' : ''}` }] };
       } catch (e) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -947,7 +963,7 @@ function buildServer() {
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
       try {
         const change = declineEmailChange(change_id);
-        return { content: [{ type: 'text', text: `Declined: ${change.field_label}${change.email_deleted ? ' - that was the last pending change, so the email has been removed from the inbox.' : ''}` }] };
+        return { content: [{ type: 'text', text: `Declined: ${change.field_label}${change.email_deleted ? ' - that was the last pending change across every linked record, so the email has been removed from the inbox.' : ''}` }] };
       } catch (e) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -956,13 +972,19 @@ function buildServer() {
 
   server.tool(
     'apply_all_inbound_email_changes',
-    'Apply every still-pending proposed field change for one inbound email in a single action. If that resolves every change on the email, it is removed from the inbox. Requires session_token from identify_user_by_pin.',
-    { session_token: z.string().optional(), id: z.number() },
-    async ({ session_token, id }) => {
+    'Apply every still-pending proposed field change for one inbound email in a single action. Give record_type + record_no to scope this to just one linked record (useful when the email is linked to more than one) - omit both to apply every linked record\'s changes at once. If that resolves every change across the whole email, it is removed from the inbox. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number(), record_type: z.enum(['concept', 'style', 'order']).optional(), record_no: z.string().optional() },
+    async ({ session_token, id, record_type, record_no }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
-      const { results, email_deleted } = applyAllEmailChanges(id);
-      if (!results.length) return { content: [{ type: 'text', text: 'No pending changes for this email.' }] };
+      let record;
+      if (record_type && record_no) {
+        const recordId = resolveRecordIdMcp(record_type, record_no);
+        if (!recordId) return { content: [{ type: 'text', text: `No ${record_type} found for ${record_no}` }] };
+        record = { matchType: record_type, matchId: recordId };
+      }
+      const { results, email_deleted } = applyAllEmailChanges(id, record);
+      if (!results.length) return { content: [{ type: 'text', text: 'No pending changes to apply.' }] };
       const failed = results.filter(r => !r.ok);
       return { content: [{ type: 'text', text: `Applied ${results.length - failed.length}/${results.length} change(s).${failed.length ? ' Failed: ' + failed.map(f => `${f.field_name} (${f.error})`).join(', ') : ''}${email_deleted ? ' Email fully resolved and removed from the inbox.' : ''}` }] };
     }
@@ -970,13 +992,19 @@ function buildServer() {
 
   server.tool(
     'decline_all_inbound_email_changes',
-    'Decline every still-pending proposed field change for one inbound email in a single action. If that resolves every change on the email, it is removed from the inbox. Requires session_token from identify_user_by_pin.',
-    { session_token: z.string().optional(), id: z.number() },
-    async ({ session_token, id }) => {
+    'Decline every still-pending proposed field change for one inbound email in a single action. Give record_type + record_no to scope this to just one linked record (useful when the email is linked to more than one) - omit both to decline every linked record\'s changes at once. If that resolves every change across the whole email, it is removed from the inbox. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number(), record_type: z.enum(['concept', 'style', 'order']).optional(), record_no: z.string().optional() },
+    async ({ session_token, id, record_type, record_no }) => {
       const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
       if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
-      const { results, email_deleted } = declineAllEmailChanges(id);
-      if (!results.length) return { content: [{ type: 'text', text: 'No pending changes for this email.' }] };
+      let record;
+      if (record_type && record_no) {
+        const recordId = resolveRecordIdMcp(record_type, record_no);
+        if (!recordId) return { content: [{ type: 'text', text: `No ${record_type} found for ${record_no}` }] };
+        record = { matchType: record_type, matchId: recordId };
+      }
+      const { results, email_deleted } = declineAllEmailChanges(id, record);
+      if (!results.length) return { content: [{ type: 'text', text: 'No pending changes to decline.' }] };
       return { content: [{ type: 'text', text: `Declined ${results.length} change(s).${email_deleted ? ' Email fully resolved and removed from the inbox.' : ''}` }] };
     }
   );
