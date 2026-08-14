@@ -93,6 +93,21 @@ let DEMO_INBOX = [
     linkedRecords: [],
     candidates: [],
   },
+  {
+    id: 7,
+    from_name: 'PnP Buying Team', from_email: 'buyer@pnp-example.co.za',
+    subject: 'Question about SAMPLE-PYG001',
+    received_at: '2026-08-14 13:15',
+    // Matched via the style code, but purely a question - no data to
+    // propose. Without Dismiss this would sit here forever (nothing to
+    // Apply/Decline that would ever clear it) - that's the exact gap the
+    // Dismiss button below fixes.
+    body: `Hi, could you send over more details on SAMPLE-PYG001 - specifically the fabric composition and current delivery timeline? Thanks!`,
+    linkedRecords: [
+      { type: 'style', no: 'SAMPLE-PYG001', label: 'Girls Denim Jacket', changes: [] },
+    ],
+    candidates: [],
+  },
 ];
 
 // Small stand-in for a real search-by-style/concept/order-number endpoint -
@@ -201,6 +216,16 @@ function inboxLinkRecord(emailId, no){
   item.linkedRecords.push({ type: record.type, no: record.no, label: record.label, changes: [] });
   render();
 }
+// "There's nothing here worth acting on" - covers what Apply/Decline can't:
+// an email matched to a real record with zero proposed changes (e.g. a
+// buyer just asking a question) would otherwise sit in the inbox forever,
+// since nothing would ever trigger maybeRemoveResolved. Unconditional -
+// works even with pending changes or unlinked candidates still open.
+function inboxDismiss(emailId){
+  DEMO_INBOX = DEMO_INBOX.filter(e => e.id !== emailId);
+  if (state.inboxDemo.expandedId === emailId) state.inboxDemo.expandedId = null;
+  render();
+}
 
 const INBOX_BADGE_STYLE = 'display:inline-block;font-size:9pt;font-weight:600;padding:2px 9px;border-radius:9px;white-space:nowrap;';
 const INBOX_STATUS_BADGE = {
@@ -258,7 +283,10 @@ function renderInboxRow(item){
 function renderInboxDetail(item){
   return `
     <div style="border-top:1px solid var(--line);padding:16px 18px;background:var(--line-soft);">
-      <div style="white-space:pre-wrap;font-size:13.5px;background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">${item.body}</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;">
+        <div style="white-space:pre-wrap;font-size:13.5px;background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;flex:1;">${item.body}</div>
+        <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px;flex-shrink:0;" title="Nothing here worth acting on - clear it without applying anything" onclick="inboxDismiss(${item.id})">Dismiss</button>
+      </div>
       ${item.linkedRecords.map((r, idx) => renderInboxRecordChanges(item, r, idx)).join('')}
       ${item.candidates.length ? renderInboxCandidates(item) : ''}
       ${!item.linkedRecords.length && !item.candidates.length ? renderInboxSearchBox(item) : ''}

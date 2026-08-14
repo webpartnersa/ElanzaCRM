@@ -15,7 +15,7 @@ const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/concept
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText, buildReminderEmailHtml, buildReminderPlainText } = require('../lib/conceptGenericRequestEmailHtml');
 const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
 const { imageFileToEmailDataUrl } = require('../lib/imageConvert');
-const { applyChange: applyEmailChange, declineChange: declineEmailChange, applyAllPending: applyAllEmailChanges, declineAllPending: declineAllEmailChanges, resolveMatch: resolveEmailMatch, recordLabel: emailRecordLabel, getLinkedRecords: emailGetLinkedRecords } = require('../lib/emailApply');
+const { applyChange: applyEmailChange, declineChange: declineEmailChange, applyAllPending: applyAllEmailChanges, declineAllPending: declineAllEmailChanges, resolveMatch: resolveEmailMatch, recordLabel: emailRecordLabel, getLinkedRecords: emailGetLinkedRecords, dismissEmail } = require('../lib/emailApply');
 
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -1006,6 +1006,22 @@ function buildServer() {
       const { results, email_deleted } = declineAllEmailChanges(id, record);
       if (!results.length) return { content: [{ type: 'text', text: 'No pending changes to decline.' }] };
       return { content: [{ type: 'text', text: `Declined ${results.length} change(s).${email_deleted ? ' Email fully resolved and removed from the inbox.' : ''}` }] };
+    }
+  );
+
+  server.tool(
+    'dismiss_inbound_email',
+    'Clear an inbound email out of the inbox with nothing applied - use this when it\'s matched to a real record but there\'s genuinely no field data to update (e.g. a buyer just asking a question about a style), or when it\'s simply not worth pursuing. Unlike applying/declining every change, this works immediately even with pending changes or unlinked candidates still outstanding - it removes the email outright, same as fully resolving it. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number() },
+    async ({ session_token, id }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      try {
+        dismissEmail(id);
+        return { content: [{ type: 'text', text: `Dismissed - removed from the inbox.` }] };
+      } catch (e) {
+        return { content: [{ type: 'text', text: e.message }] };
+      }
     }
   );
 
