@@ -14,6 +14,7 @@ function renderShell(){
       <div class="sidelogo"><img src="/img/E-Logo-concept.PNG"></div>
       <nav class="nav">
         ${hasPerm(u,'shipping') ? `<a class="${state.view==='shipping'?'active':''}" onclick="goto('shipping')"><span class="nav-dot"></span>Orders</a>` : ''}
+        ${hasPerm(u,'shipping') ? `<a class="${state.view==='tasksDemo'?'active':''}" onclick="goto('tasksDemo')"><span class="nav-dot"></span>Tasks (Demo)</a>` : ''}
         ${(hasPerm(u,'shipping')||hasPerm(u,'fabrics')) ? `<a class="${state.view==='notifications'?'active':''}" onclick="goto('notifications')"><span class="nav-dot" style="${alertCount?'background:var(--stitch-red);':''}"></span>Notifications${alertCount?` (${alertCount})`:''}</a>` : ''}
         ${hasPerm(u,'styles') ? `<a class="${state.view==='dashboard'?'active':''}" onclick="goto('dashboard')"><span class="nav-dot"></span>Styles</a>` : ''}
         ${hasPerm(u,'concepts') ? `<a class="${state.view==='concepts'?'active':''}" onclick="goto('concepts')"><span class="nav-dot"></span>Concepts</a>` : ''}
@@ -31,6 +32,7 @@ function renderShell(){
       ${state.view==='dashboard' ? renderDashboard() : ''}
       ${state.view==='concepts' ? renderConceptsView() : ''}
       ${state.view==='shipping' ? renderShippingView() : ''}
+      ${state.view==='tasksDemo' ? renderTasksDemoView() : ''}
       ${state.view==='notifications' ? renderNotificationsView() : ''}
       ${state.view==='contacts' ? renderContactsView() : ''}
       ${state.view==='factories' ? renderFactoriesView() : ''}
