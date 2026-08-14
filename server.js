@@ -4,6 +4,10 @@ const session = require('express-session');
 const path = require('path');
 
 const app = express();
+// Mounted before express.json() below - the webhook route inside needs the
+// exact raw request bytes for Svix signature verification, which
+// express.json() would otherwise consume (and not preserve) first.
+app.use('/api/inbound', require('./routes/inboundEmail'));
 app.use(express.json({ limit: '15mb' }));
 // The mobile PWA (installed to a phone's home screen) has no version/hash
 // in its script tag (see public/mobile/index.html) and no cache-busting

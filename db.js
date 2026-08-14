@@ -468,6 +468,52 @@ CREATE TABLE IF NOT EXISTS concepts (
     message TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- Raw inbound email (crm@portal.elanzas.com via Resend Inbound), one row
+  -- per message. resend_email_id is Resend's own id for the email - UNIQUE
+  -- so the webhook handler can safely upsert/ignore on redelivery (Svix,
+  -- which Resend uses for webhook delivery, is at-least-once, not
+  -- exactly-once). fetch_status tracks the two-step nature of Resend's
+  -- inbound flow: the webhook payload itself is metadata-only (no body/
+  -- attachments), so a row is inserted the instant the webhook is verified
+  -- ('pending'), then a follow-up call to Resend's Receiving/Attachments
+  -- API fills in the body and downloads attachments to private storage
+  -- ('fetched') - or records why that failed ('failed', retried by a
+  -- background sweep) - see routes/inboundEmail.js. This split means a
+  -- durable record exists the moment anything arrives, even if the
+  -- follow-up fetch hasn't succeeded yet - inbound loss should be harder
+  -- to hit than the existing outbound send failures.
+  -- is_work_related/match_*/classified_at are Phase 2 (classification +
+  -- matching to a style/order/request) - left null/unused until that's
+  -- built, not populated by Phase 1's plumbing.
+  CREATE TABLE IF NOT EXISTS inbound_emails (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resend_email_id TEXT UNIQUE NOT NULL,
+    from_email TEXT,
+    from_name TEXT,
+    to_email TEXT,
+    cc TEXT,
+    subject TEXT,
+    message_id TEXT,
+    in_reply_to TEXT,
+    references_header TEXT,
+    text_body TEXT,
+    html_body TEXT,
+    headers_json TEXT,
+    attachments_json TEXT,
+    received_at TEXT,
+    fetch_status TEXT NOT NULL DEFAULT 'pending',
+    fetch_error TEXT,
+    fetch_attempts INTEGER NOT NULL DEFAULT 0,
+    is_work_related INTEGER,
+    match_status TEXT,
+    match_type TEXT,
+    match_id INTEGER,
+    match_confidence REAL,
+    match_candidates_json TEXT,
+    classified_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // One-time backfill: auto-link every already-uploaded report to every style
