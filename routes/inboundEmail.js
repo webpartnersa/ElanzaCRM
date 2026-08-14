@@ -1,11 +1,14 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const OpenAI = require('openai');
 const { Webhook } = require('svix');
 const { db } = require('../db');
 const { fetchReceivedEmail, fetchAttachmentMeta, downloadAttachmentBytes } = require('../lib/resendInbound');
+const { classifyAndMatch } = require('../lib/emailMatch');
 
 const router = express.Router();
+const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 // Never under public/ or /uploads - inbound mail can contain anything a
 // factory or buyer sends, same "authenticated routes only" reasoning as
@@ -97,6 +100,18 @@ async function fetchAndStore(resendEmailId) {
       resendEmailId
     );
     console.log(`Inbound email ${resendEmailId} fetched and stored (${attachmentsMeta.length} attachment(s))`);
+
+    // Phase 2 (classification + matching) runs right after a successful
+    // fetch - staged separately from fetchAndStore's own try/catch so a
+    // classification failure (e.g. an OpenAI blip) doesn't get reported as
+    // a fetch failure or trigger the fetch retry sweep for something that
+    // already succeeded; classifySweep below covers this case instead.
+    try {
+      const result = await classifyAndMatch(resendEmailId, openaiClient);
+      if (result) console.log(`Inbound email ${resendEmailId} classified: match=${result.status}${result.type ? ` (${result.type} #${result.id})` : ''}`);
+    } catch (e) {
+      console.error(`Inbound email ${resendEmailId} classification failed:`, e.message);
+    }
   } catch (e) {
     db.prepare(`
       UPDATE inbound_emails SET fetch_status = 'failed', fetch_error = ?, fetch_attempts = fetch_attempts + 1
@@ -163,5 +178,21 @@ function retrySweep() {
     .catch(e => console.error('Inbound retry sweep error:', e.message));
 }
 setInterval(retrySweep, RETRY_SWEEP_INTERVAL_MS);
+
+// Same sweep pattern as retrySweep, for the classification step instead of
+// the fetch step - a row can be fully fetched but never classified if the
+// process restarted between the two, or the OpenAI call itself failed.
+function classifySweep() {
+  const stuck = db.prepare(`
+    SELECT resend_email_id FROM inbound_emails
+    WHERE fetch_status = 'fetched' AND classified_at IS NULL
+    ORDER BY created_at ASC LIMIT 20
+  `).all();
+  if (!stuck.length) return;
+  console.log(`Inbound classify sweep: classifying ${stuck.length} email(s)`);
+  stuck.reduce((chain, row) => chain.then(() => classifyAndMatch(row.resend_email_id, openaiClient)), Promise.resolve())
+    .catch(e => console.error('Inbound classify sweep error:', e.message));
+}
+setInterval(classifySweep, RETRY_SWEEP_INTERVAL_MS);
 
 module.exports = router;
