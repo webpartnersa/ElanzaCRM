@@ -140,6 +140,17 @@ const CHANGE_STATUS_STYLE = {
 };
 const MATCH_TYPE_LABEL = { concept: 'Concept', style: 'Style', order: 'Order' };
 
+// received_at is stored/sent as UTC (Resend's own timestamp) - the droplet
+// itself stays on UTC on purpose (avoids DST/log-ordering headaches
+// server-side), so conversion to the viewer's own local time belongs here,
+// same toLocaleString() convention already used for created_at elsewhere
+// in this app (see public/js/requests.js, drawer.js).
+function formatInboxDate(receivedAt){
+  if (!receivedAt) return '';
+  const d = new Date(receivedAt);
+  return isNaN(d.getTime()) ? receivedAt : d.toLocaleString();
+}
+
 function renderInboxView(){
   initInboxState();
   if (state.inbox.emails === null && !state.inbox.loading) loadInboxEmails();
@@ -172,7 +183,7 @@ function renderInboxRow(item){
             ${INBOX_STATUS_BADGE[item.match_status] || ''}
             ${linkedSummary ? `<span class="hint">${escapeHtml(linkedSummary)}</span>` : ''}
           </div>
-          <div class="hint" style="margin-top:3px;">${escapeHtml(item.from_name || item.from_email || '')} &lt;${escapeHtml(item.from_email || '')}&gt; &middot; ${item.received_at || ''}</div>
+          <div class="hint" style="margin-top:3px;">${escapeHtml(item.from_name || item.from_email || '')} &lt;${escapeHtml(item.from_email || '')}&gt; &middot; ${formatInboxDate(item.received_at)}</div>
         </div>
         <div class="hint" style="flex-shrink:0;">${expanded ? '▲' : '▼'}</div>
       </div>
