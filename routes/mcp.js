@@ -15,6 +15,7 @@ const { buildCostingEmailHtml, buildCostingPlainText } = require('../lib/concept
 const { buildGenericRequestEmailHtml, buildGenericRequestPlainText, buildReminderEmailHtml, buildReminderPlainText } = require('../lib/conceptGenericRequestEmailHtml');
 const { sendMail, isConfigured: mailIsConfigured, resolveSender } = require('../lib/mailer');
 const { imageFileToEmailDataUrl } = require('../lib/imageConvert');
+const { applyChange: applyEmailChange, declineChange: declineEmailChange, applyAllPending: applyAllEmailChanges, declineAllPending: declineAllEmailChanges, resolveMatch: resolveEmailMatch, recordLabel: emailRecordLabel } = require('../lib/emailApply');
 
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -841,6 +842,142 @@ function buildServer() {
         fully_covered: fullyCovered,
         reports_found: rows.map(summarizeReport),
       }, null, 2) }] };
+    }
+  );
+
+  // ---- Inbound Email Inbox (AI-matched factory/buyer mail) ----
+  // Voice/chat parity for the Review Inbox UI (public/js/inboxDemo.js is
+  // still the mock-data prototype at time of writing - these tools drive
+  // the same real backend, see lib/emailMatch.js / lib/emailExtract.js /
+  // lib/emailApply.js, that a real web UI will eventually call too, so
+  // there's exactly one place field changes ever actually get written).
+  // Gated with blockBuyer like the other cost/factory-sensitive tools
+  // (send_request, update_order) - inbound mail can carry costing/factory
+  // detail a buyer account shouldn't see.
+  function summarizeInboundEmail(row) {
+    const pendingCount = db.prepare(`SELECT COUNT(*) c FROM inbound_email_field_changes WHERE inbound_email_id = ? AND status = 'pending'`).get(row.id).c;
+    return {
+      id: row.id, from: row.from_email, subject: row.subject, received_at: row.received_at,
+      match_status: row.match_status, match_type: row.match_type,
+      match_record: row.match_type ? emailRecordLabel(row.match_type, row.match_id) : null,
+      pending_changes: pendingCount,
+    };
+  }
+  function resolveRecordIdMcp(recordType, recordNo) {
+    if (recordType === 'concept') { const c = findConcept(recordNo); return c ? c.id : null; }
+    if (recordType === 'style') { const s = findStyleByNo(recordNo); return s ? s.id : null; }
+    if (recordType === 'order') { const o = findOrder({ order_no: recordNo, style_no: recordNo }); return o ? o.id : null; }
+    return null;
+  }
+
+  server.tool(
+    'list_inbound_emails',
+    'List inbound emails Docket has matched to concepts/styles/orders (from crm@portal.elanzas.com), optionally filtered by match status. Each entry shows how many field changes are still pending review. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), match_status: z.enum(['matched', 'multiple', 'unmatched']).optional() },
+    async ({ session_token, match_status }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      let rows = db.prepare(`SELECT * FROM inbound_emails WHERE fetch_status = 'fetched' ORDER BY created_at DESC`).all();
+      if (match_status) rows = rows.filter(r => r.match_status === match_status);
+      const summary = rows.map(summarizeInboundEmail);
+      return { content: [{ type: 'text', text: summary.length ? JSON.stringify(summary, null, 2) : 'No inbound emails found.' }] };
+    }
+  );
+
+  server.tool(
+    'get_inbound_email',
+    'Get one inbound email\'s full body, its match (or candidate list, if still ambiguous), and every proposed field change with its current/proposed value and the exact source snippet. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number() },
+    async ({ session_token, id }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      const row = db.prepare('SELECT * FROM inbound_emails WHERE id = ?').get(id);
+      if (!row) return { content: [{ type: 'text', text: `No inbound email found with id ${id}` }] };
+      const changes = db.prepare(`SELECT id, field_name, field_label, current_value, proposed_value, source_snippet, status FROM inbound_email_field_changes WHERE inbound_email_id = ? ORDER BY id ASC`).all(id);
+      const candidates = row.match_status === 'multiple' && row.match_candidates_json ? JSON.parse(row.match_candidates_json) : null;
+      return { content: [{ type: 'text', text: JSON.stringify({
+        id: row.id, from: row.from_email, subject: row.subject, received_at: row.received_at, body: row.text_body,
+        match_status: row.match_status, match_type: row.match_type,
+        match_record: row.match_type ? emailRecordLabel(row.match_type, row.match_id) : null,
+        candidates, changes,
+      }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'resolve_inbound_email_match',
+    'Tell Docket which real concept/style/order an inbound email is actually about - use this both to pick the right one when get_inbound_email showed multiple candidates, and to manually link an email that came back unmatched. Immediately re-runs field-change extraction against the confirmed record. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number(), record_type: z.enum(['concept', 'style', 'order']), record_no: z.string().describe('The concept number, style number, or order/style number for an order') },
+    async ({ session_token, id, record_type, record_no }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      const recordId = resolveRecordIdMcp(record_type, record_no);
+      if (!recordId) return { content: [{ type: 'text', text: `No ${record_type} found for ${record_no}` }] };
+      try {
+        const { record, changes } = await resolveEmailMatch(id, record_type, recordId, openaiClient);
+        return { content: [{ type: 'text', text: `Linked to ${record_type} ${record.no}. ${changes.length ? `${changes.length} field change(s) proposed - review with get_inbound_email.` : 'No field changes proposed from this email.'}` }] };
+      } catch (e) {
+        return { content: [{ type: 'text', text: e.message }] };
+      }
+    }
+  );
+
+  server.tool(
+    'apply_inbound_email_change',
+    'Apply one specific proposed field change from an inbound email to the real concept/style/order record. Get the change id from get_inbound_email first. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), change_id: z.number() },
+    async ({ session_token, change_id }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      try {
+        const change = applyEmailChange(change_id);
+        return { content: [{ type: 'text', text: `Applied: ${change.field_label} → ${change.proposed_value}` }] };
+      } catch (e) {
+        return { content: [{ type: 'text', text: e.message }] };
+      }
+    }
+  );
+
+  server.tool(
+    'decline_inbound_email_change',
+    'Decline one specific proposed field change from an inbound email - it stays on record as declined, nothing is written to the real concept/style/order. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), change_id: z.number() },
+    async ({ session_token, change_id }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      try {
+        const change = declineEmailChange(change_id);
+        return { content: [{ type: 'text', text: `Declined: ${change.field_label}` }] };
+      } catch (e) {
+        return { content: [{ type: 'text', text: e.message }] };
+      }
+    }
+  );
+
+  server.tool(
+    'apply_all_inbound_email_changes',
+    'Apply every still-pending proposed field change for one inbound email in a single action. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number() },
+    async ({ session_token, id }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      const results = applyAllEmailChanges(id);
+      if (!results.length) return { content: [{ type: 'text', text: 'No pending changes for this email.' }] };
+      const failed = results.filter(r => !r.ok);
+      return { content: [{ type: 'text', text: `Applied ${results.length - failed.length}/${results.length} change(s).${failed.length ? ' Failed: ' + failed.map(f => `${f.field_name} (${f.error})`).join(', ') : ''}` }] };
+    }
+  );
+
+  server.tool(
+    'decline_all_inbound_email_changes',
+    'Decline every still-pending proposed field change for one inbound email in a single action. Requires session_token from identify_user_by_pin.',
+    { session_token: z.string().optional(), id: z.number() },
+    async ({ session_token, id }) => {
+      const auth = requireSession(session_token, { anySection: ['concepts', 'styles', 'shipping'], blockBuyer: true });
+      if (auth.error) return { content: [{ type: 'text', text: auth.error }] };
+      const results = declineAllEmailChanges(id);
+      if (!results.length) return { content: [{ type: 'text', text: 'No pending changes for this email.' }] };
+      return { content: [{ type: 'text', text: `Declined ${results.length} change(s).` }] };
     }
   );
 
