@@ -6,7 +6,7 @@
 // inbound_emails / inbound_email_field_changes instead of hand-written
 // sample data.
 function initInboxState(){
-  if (!state.inbox) state.inbox = { emails: null, expandedId: null, detail: null, searchQuery: {}, searchResults: {}, loading: false };
+  if (!state.inbox) state.inbox = { emails: null, expandedId: null, detail: null, searchQuery: {}, searchResults: {}, showFullBody: {}, loading: false };
 }
 
 async function loadInboxEmails(){
@@ -181,13 +181,31 @@ function renderInboxRow(item){
   `;
 }
 
+function inboxToggleFullBody(emailId){
+  initInboxState();
+  if (!state.inbox.showFullBody) state.inbox.showFullBody = {};
+  state.inbox.showFullBody[emailId] = !state.inbox.showFullBody[emailId];
+  render();
+}
+
 function renderInboxDetail(emailId){
   const d = state.inbox.detail;
   if (!d || d.id !== emailId) return `<div style="border-top:1px solid var(--line);padding:16px 18px;" class="hint">Loading...</div>`;
+  const hasKeyPoints = Array.isArray(d.key_points) && d.key_points.length > 0;
+  const showFull = !hasKeyPoints || (state.inbox.showFullBody && state.inbox.showFullBody[emailId]);
   return `
     <div style="border-top:1px solid var(--line);padding:16px 18px;background:var(--line-soft);">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;">
-        <div style="white-space:pre-wrap;font-size:13.5px;background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;flex:1;">${escapeHtml(d.body || '(no body)')}</div>
+        <div style="background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;flex:1;">
+          ${showFull ? `
+            <div style="white-space:pre-wrap;font-size:13.5px;">${escapeHtml(d.body || '(no body)')}</div>
+          ` : `
+            <ul style="margin:0;padding-left:18px;font-size:13.5px;">
+              ${d.key_points.map(p => `<li style="margin-bottom:4px;">${escapeHtml(p)}</li>`).join('')}
+            </ul>
+          `}
+          ${hasKeyPoints ? `<a href="#" onclick="inboxToggleFullBody(${d.id});return false;" style="font-size:12px;display:inline-block;margin-top:8px;">${showFull ? 'Show summary' : 'Show full email'}</a>` : ''}
+        </div>
         <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px;flex-shrink:0;" title="Nothing here worth acting on - clear it without applying anything" onclick="inboxDismiss(${d.id})">Dismiss</button>
       </div>
       ${d.linked_records.map(r => renderInboxRecordChanges(d.id, r)).join('')}

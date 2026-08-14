@@ -1079,6 +1079,11 @@ ensureColumn('inbound_emails', 'extracted_at', 'TEXT');
 // list/badge display - see lib/emailApply.js's resolveMatch.
 ensureColumn('inbound_email_field_changes', 'match_type', 'TEXT');
 ensureColumn('inbound_email_field_changes', 'match_id', 'INTEGER');
+// Short bullet-point summary of an inbound email's key facts, shown in the
+// Review Inbox instead of the full raw body by default (see
+// lib/emailMatch.js's classifyWorkRelated, which generates this in the
+// same LLM call as the work-related classification - one call, not two).
+ensureColumn('inbound_emails', 'key_points_json', 'TEXT');
 db.exec(`
   CREATE TABLE IF NOT EXISTS inbound_email_field_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

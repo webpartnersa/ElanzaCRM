@@ -67,9 +67,12 @@ router.get('/emails', (req, res) => {
 router.get('/emails/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM inbound_emails WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Email not found' });
+  let keyPoints = [];
+  if (row.key_points_json) { try { keyPoints = JSON.parse(row.key_points_json); } catch (e) { keyPoints = []; } }
   res.json({
     id: row.id, from_email: row.from_email, from_name: row.from_name, subject: row.subject, received_at: row.received_at,
     body: row.text_body,
+    key_points: keyPoints,
     match_status: row.match_status,
     linked_records: linkedRecordsWithChanges(row.id, true),
     unlinked_candidates: unlinkedCandidates(row),
