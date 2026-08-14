@@ -1063,6 +1063,26 @@ function ensureConceptRequestsConceptIdNullable() {
 }
 ensureConceptRequestsConceptIdNullable();
 
+// Phase 3 of the inbound email inbox: staged, human-reviewable field
+// changes proposed from a matched email's content - nothing here is ever
+// applied automatically (see lib/emailExtract.js). extracted_at lets
+// routes/inboundEmail.js's extractSweep tell "ran extraction, found
+// nothing" apart from "never ran" for a matched row.
+ensureColumn('inbound_emails', 'extracted_at', 'TEXT');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS inbound_email_field_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inbound_email_id INTEGER NOT NULL REFERENCES inbound_emails(id),
+    field_name TEXT NOT NULL,
+    field_label TEXT,
+    current_value TEXT,
+    proposed_value TEXT,
+    source_snippet TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 function seed() {
   // Backfills concept_date for any concept created before this field
   // existed, using its original creation month/year. New concepts already

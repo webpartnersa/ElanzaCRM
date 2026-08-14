@@ -6,6 +6,7 @@ const { Webhook } = require('svix');
 const { db } = require('../db');
 const { fetchReceivedEmail, fetchAttachmentMeta, downloadAttachmentBytes } = require('../lib/resendInbound');
 const { classifyAndMatch } = require('../lib/emailMatch');
+const { extractFieldChanges } = require('../lib/emailExtract');
 
 const router = express.Router();
 const openaiClient = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -109,8 +110,17 @@ async function fetchAndStore(resendEmailId) {
     try {
       const result = await classifyAndMatch(resendEmailId, openaiClient);
       if (result) console.log(`Inbound email ${resendEmailId} classified: match=${result.status}${result.type ? ` (${result.type} #${result.id})` : ''}`);
+
+      // Phase 3 (extraction) only makes sense once there's a single
+      // confident match - 'multiple'/'unmatched' emails have nothing to
+      // diff proposed values against yet, so they wait for a human to
+      // resolve the match first (Phase 4).
+      if (result && result.status === 'matched') {
+        const changes = await extractFieldChanges(resendEmailId, openaiClient);
+        console.log(`Inbound email ${resendEmailId} extracted ${changes.length} proposed field change(s)`);
+      }
     } catch (e) {
-      console.error(`Inbound email ${resendEmailId} classification failed:`, e.message);
+      console.error(`Inbound email ${resendEmailId} classification/extraction failed:`, e.message);
     }
   } catch (e) {
     db.prepare(`
@@ -194,5 +204,23 @@ function classifySweep() {
     .catch(e => console.error('Inbound classify sweep error:', e.message));
 }
 setInterval(classifySweep, RETRY_SWEEP_INTERVAL_MS);
+
+// Same pattern again for extraction - catches a matched, classified row
+// that never got its Phase 3 pass (process restart, or a match that
+// resolved from 'multiple'/'unmatched' to 'matched' after a human picked a
+// record in the future Review Inbox UI, which needs extraction run for the
+// first time at that point too).
+function extractSweep() {
+  const stuck = db.prepare(`
+    SELECT resend_email_id FROM inbound_emails
+    WHERE fetch_status = 'fetched' AND match_status = 'matched' AND extracted_at IS NULL
+    ORDER BY created_at ASC LIMIT 20
+  `).all();
+  if (!stuck.length) return;
+  console.log(`Inbound extract sweep: extracting ${stuck.length} email(s)`);
+  stuck.reduce((chain, row) => chain.then(() => extractFieldChanges(row.resend_email_id, openaiClient)), Promise.resolve())
+    .catch(e => console.error('Inbound extract sweep error:', e.message));
+}
+setInterval(extractSweep, RETRY_SWEEP_INTERVAL_MS);
 
 module.exports = router;
