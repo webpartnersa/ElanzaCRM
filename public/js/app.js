@@ -10,6 +10,7 @@ function goto(view){
   else if (view==='finance') { if (state.user.role==='admin') loadFinance(); else render(); }
   else if (view==='settings') { if (state.user.role==='admin') loadUsers(); else render(); }
   else if (view==='notifications') { if (hasPerm(state.user,'shipping') && !state.shipping) loadShipping(); else render(); }
+  else if (view==='inbox') loadInboxEmails();
   else render();
 }
 

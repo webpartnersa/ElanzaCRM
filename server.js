@@ -45,6 +45,7 @@ app.use('/api/factories', require('./routes/factories'));
 app.use('/api/fabrics', require('./routes/fabrics'));
 app.use('/api/finance', require('./routes/finance'));
 app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/inbox', require('./routes/inbox'));
 app.use('/api/admin/users', require('./routes/users'));
 app.use('/api/admin', require('./routes/adminReset'));
 app.use('/mcp', require('./routes/mcp'));
